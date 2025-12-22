@@ -1,0 +1,8 @@
+.DS_Store
+.build/
+.claude/
+WattBar
+WattBarClean.xcodeproj/xcuserdata/
+WattBarClean.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcuserstate
+*.xcuserstate.tmp
