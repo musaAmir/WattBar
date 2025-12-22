@@ -1,20 +1,20 @@
 #!/bin/bash
 
-# Clean rebuild script for WattBarClean
+# Clean rebuild script for WattBar
 
-echo "Building WattBarClean..."
+echo "Building WattBar..."
 
-swiftc -o WattBarClean \
+swiftc -o WattBar \
     -framework Cocoa \
     -framework SwiftUI \
     -framework Combine \
     -framework IOKit \
-    WattBarClean/WattBarApp.swift \
-    WattBarClean/SMC.swift
+    WattBar/WattBarApp.swift \
+    WattBar/SMC.swift
 
 if [ $? -eq 0 ]; then
     echo "✅ Build successful!"
-    echo "Run with: ./WattBarClean"
+    echo "Run with: ./WattBar"
 else
     echo "❌ Build failed"
     exit 1

@@ -1,14 +1,14 @@
-# WattBar Clean
+# WattBar
 
 Minimal rebuild based on [WattSec](https://github.com/beutton/wattsec) implementation.
 
 ## Build with Xcode
 
-1. Open `WattBarClean.xcodeproj` in Xcode
-2. Select the `WattBarClean` scheme
+1. Open `WattBar.xcodeproj` in Xcode
+2. Select the `WattBar` scheme
 3. Build and Run (⌘R)
 
-Project files live in `WattBarClean/`.
+Project files live in `WattBar/`.
 
 ## What it does
 
