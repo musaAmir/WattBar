@@ -33,9 +33,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var powerStatusItem: NSStatusItem?
     private var batteryStatusItem: NSStatusItem?
     private var timer: Timer?
-    private var activity: NSObjectProtocol?
     private var preferencesWindow: NSWindow?
     private var preferencesController: PreferencesController?
+
+    // Battery image cache to avoid regenerating on every update
+    private var cachedBatteryImage: NSImage?
+    private var cachedBatteryPercent: Int = -1
+    private var cachedBatteryIsCharging: Bool = false
+    private var cachedBatteryIconStyle: BatteryIconStyle = .dark
+
+    // Cache for last displayed power value to skip unnecessary string formatting
+    private var lastDisplayedPowerValue: Float = -1
 
     private var currentReading: PowerReading = .zero {
         didSet {
@@ -123,7 +131,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
            let interval = RefreshInterval(rawValue: savedInterval) {
             refreshInterval = interval
         } else {
-            refreshInterval = .oneSecond
+            // Default to 2 seconds for better energy efficiency
+            refreshInterval = .twoSeconds
         }
 
         super.init()
@@ -133,15 +142,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItems()
-        startActivity()
         startTimer()
         setupPowerSourceNotifications()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        if let activity = activity {
-            ProcessInfo.processInfo.endActivity(activity)
-        }
         timer?.invalidate()
     }
 
@@ -334,14 +339,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: Timer
 
     private func startTimer() {
-        let interval = max(0.5, refreshInterval.rawValue)
+        let interval = max(1.0, refreshInterval.rawValue)
         let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             self?.refreshReading()
         }
-        RunLoop.main.add(timer, forMode: .common)
-        timer.tolerance = 0.05
-        timer.fireDate = Date()
+        // Use .default mode instead of .common to allow better power management
+        // The timer doesn't need to fire during modal dialogs or scrolling
+        RunLoop.main.add(timer, forMode: .default)
+        // Set tolerance to 50% of interval to allow aggressive timer coalescing
+        // This lets macOS batch timer fires and keep CPU in low-power states longer
+        timer.tolerance = interval * 0.5
         self.timer = timer
+        // Only call refreshReading once (timer will fire on its own schedule)
         refreshReading()
     }
 
@@ -352,7 +361,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func refreshReading() {
-        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+        // Use .utility QoS for energy efficiency - this is background monitoring work,
+        // not user-initiated interactive work that needs immediate response
+        DispatchQueue.global(qos: .utility).async { [weak self] in
             let data = SMC.shared.readPowerData()
 
             let reading = PowerReading(
@@ -368,15 +379,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.currentReading = reading
                 self?.updateDisplay()
             }
-        }
-    }
-
-    private func startActivity() {
-        if activity == nil {
-            activity = ProcessInfo.processInfo.beginActivity(
-                options: [.userInitiated, .idleSystemSleepDisabled, .latencyCritical],
-                reason: "Real-time WattBar power monitoring"
-            )
         }
     }
 
@@ -470,11 +472,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         button.imagePosition = .imageOnly
         button.title = ""
 
-        let newImage = makeBatteryStatusImage(percent: clampedPercent, isCharging: isCharging, style: batteryIconStyle)
-        newImage.cacheMode = .never
-        button.image = newImage
+        // Only regenerate image if battery state has changed (saves CPU/GPU work)
+        let needsNewImage = cachedBatteryImage == nil
+            || cachedBatteryPercent != clampedPercent
+            || cachedBatteryIsCharging != isCharging
+            || cachedBatteryIconStyle != batteryIconStyle
 
-        button.needsDisplay = true
+        if needsNewImage {
+            let newImage = makeBatteryStatusImage(percent: clampedPercent, isCharging: isCharging, style: batteryIconStyle)
+            cachedBatteryImage = newImage
+            cachedBatteryPercent = clampedPercent
+            cachedBatteryIsCharging = isCharging
+            cachedBatteryIconStyle = batteryIconStyle
+            button.image = newImage
+            button.needsDisplay = true
+        }
 
         let statusText = isCharging ? "Charging" : "On Battery"
         button.toolTip = "Battery \(clampedPercent)% - \(statusText)"
@@ -487,7 +499,47 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let font = NSFont.monospacedDigitSystemFont(ofSize: fontSize, weight: .medium)
 
         let text = "\(percent)"
-        let textColor: NSColor = isCharging ? NSColor.white : (style == .dark ? NSColor.white : NSColor.black)
+
+        // Determine fill level using discrete steps matching actual percentage
+        let discreteFillPercent: CGFloat
+        if percent >= 90 {
+            discreteFillPercent = 1.0      // 90-100% → full
+        } else if percent >= 80 {
+            discreteFillPercent = 0.85     // 80-89% → 85% fill
+        } else if percent >= 70 {
+            discreteFillPercent = 0.75     // 70-79% → 75% fill
+        } else if percent >= 60 {
+            discreteFillPercent = 0.65     // 60-69% → 65% fill
+        } else if percent >= 50 {
+            discreteFillPercent = 0.55     // 50-59% → 55% fill
+        } else if percent >= 40 {
+            discreteFillPercent = 0.45     // 40-49% → 45% fill
+        } else if percent >= 30 {
+            discreteFillPercent = 0.35     // 30-39% → 35% fill
+        } else if percent >= 20 {
+            discreteFillPercent = 0.25     // 20-29% → 25% fill
+        } else if percent >= 10 {
+            discreteFillPercent = 0.15     // 10-19% → 15% fill
+        } else if percent >= 5 {
+            discreteFillPercent = 0.08     // 5-9% → 8% fill
+        } else {
+            discreteFillPercent = 0.03     // 0-4% → almost empty
+        }
+
+        // Determine if low battery (below 20%) - will turn red
+        let isLowBattery = percent < 20 && !isCharging
+
+        // Text color: contrast with fill color
+        let textColor: NSColor
+        if isCharging {
+            textColor = NSColor.white
+        } else if isLowBattery {
+            textColor = NSColor.white
+        } else {
+            // Text needs to contrast with fill (fill is white on dark, black on light)
+            textColor = style == .dark ? NSColor.black : NSColor.white
+        }
+
         let textAttributes: [NSAttributedString.Key: Any] = [
             .font: font,
             .foregroundColor: textColor
@@ -531,10 +583,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let bodyPath = NSBezierPath(roundedRect: bodyRect, xRadius: cornerRadius, yRadius: cornerRadius)
 
         if isCharging {
-            // Charging mode: Green pill with lightning bolt
-            let greenColor = NSColor(red: 0.35, green: 0.7, blue: 0.35, alpha: 0.6)
-            greenColor.setFill()
+            // Charging mode: Green fill with lightning bolt
+            // Draw empty battery background first
+            let emptyColor = NSColor(calibratedWhite: 0.2, alpha: 1.0)
+            emptyColor.setFill()
             bodyPath.fill()
+
+            // Draw green fill level
+            let fillWidth = (bodyRect.width - strokeWidth) * discreteFillPercent
+            let fillRect = NSRect(
+                x: bodyRect.minX + strokeWidth / 2,
+                y: bodyRect.minY + strokeWidth / 2,
+                width: fillWidth,
+                height: bodyRect.height - strokeWidth
+            )
+            let fillPath = NSBezierPath(roundedRect: fillRect, xRadius: cornerRadius - 1, yRadius: cornerRadius - 1)
+            // Clip to body shape
+            NSGraphicsContext.saveGraphicsState()
+            bodyPath.addClip()
+            let greenColor = NSColor(red: 0.35, green: 0.78, blue: 0.35, alpha: 1.0)
+            greenColor.setFill()
+            fillPath.fill()
+            NSGraphicsContext.restoreGraphicsState()
 
             let strokeColor = NSColor(red: 0.4, green: 0.75, blue: 0.4, alpha: 0.8)
             strokeColor.setStroke()
@@ -547,25 +617,66 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             strokeColor.setStroke()
             capPath.stroke()
         } else {
-            // Non-charging mode: Use style-based colors
+            // Non-charging mode: Show fill level with style-based or red colors
             let backgroundColor: NSColor
+            let fillColor: NSColor
             let strokeColor: NSColor
-            switch style {
-            case .dark:
-                backgroundColor = .black
-                strokeColor = NSColor(calibratedWhite: 0.9, alpha: 1.0)
-            case .light:
-                backgroundColor = .white
-                strokeColor = NSColor(calibratedWhite: 0.85, alpha: 1.0)
+
+            if isLowBattery {
+                // Low battery: red fill on dark background
+                backgroundColor = NSColor(calibratedWhite: 0.15, alpha: 1.0)
+                // Gradient from orange to red as battery decreases
+                let redIntensity = 1.0 - (CGFloat(percent) / 20.0) * 0.3
+                fillColor = NSColor(red: 0.9, green: 0.25 * (1.0 - redIntensity), blue: 0.2 * (1.0 - redIntensity), alpha: 1.0)
+                strokeColor = NSColor(red: 0.8, green: 0.3, blue: 0.3, alpha: 0.9)
+            } else {
+                switch style {
+                case .dark:
+                    // Light background - closer to white but still distinct from fill
+                    backgroundColor = NSColor(calibratedWhite: 0.78, alpha: 1.0)
+                    fillColor = NSColor.white
+                    strokeColor = NSColor(calibratedWhite: 0.9, alpha: 1.0)
+                case .light:
+                    // Darker background for contrast with black fill
+                    backgroundColor = NSColor(calibratedWhite: 0.35, alpha: 1.0)
+                    fillColor = NSColor.black
+                    strokeColor = NSColor(calibratedWhite: 0.5, alpha: 1.0)
+                }
             }
+
+            // Draw empty battery background
             backgroundColor.setFill()
             bodyPath.fill()
+
+            // Draw fill level
+            let fillWidth = (bodyRect.width - strokeWidth) * discreteFillPercent
+            let fillRect = NSRect(
+                x: bodyRect.minX + strokeWidth / 2,
+                y: bodyRect.minY + strokeWidth / 2,
+                width: fillWidth,
+                height: bodyRect.height - strokeWidth
+            )
+
+            // Clip fill to body shape and draw
+            NSGraphicsContext.saveGraphicsState()
+            bodyPath.addClip()
+            let fillPath = NSBezierPath(rect: fillRect)
+            fillColor.setFill()
+            fillPath.fill()
+            NSGraphicsContext.restoreGraphicsState()
+
+            // Draw stroke
             strokeColor.setStroke()
             bodyPath.lineWidth = strokeWidth
             bodyPath.stroke()
 
-            // Draw cap
+            // Draw cap with fill based on battery level
             let capPath = NSBezierPath(roundedRect: capRect, xRadius: 2.5, yRadius: 2.5)
+            if discreteFillPercent >= 1.0 {
+                // Full battery (90%+): fill the cap too
+                fillColor.setFill()
+                capPath.fill()
+            }
             capPath.lineWidth = strokeWidth
             strokeColor.setStroke()
             capPath.stroke()
