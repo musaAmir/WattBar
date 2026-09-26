@@ -19,7 +19,7 @@ struct PreferencesView: View {
 
                 card("Menu Bar") {
                     toggleRow("Show Power Usage", isOn: $controller.showPowerInMenuBar)
-                    toggleRow("Show Battery %", isOn: $controller.showBatteryInMenuBar)
+                    toggleRow("Show Battery Icon", isOn: $controller.showBatteryInMenuBar)
                 }
 
                 card("Battery Icon") {

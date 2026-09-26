@@ -230,7 +230,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Toggle battery display
         let toggleBatteryItem = NSMenuItem(
-            title: "Show Battery %",
+            title: "Show Battery Icon",
             action: #selector(toggleBatteryDisplay),
             keyEquivalent: ""
         )
@@ -310,6 +310,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         togglePowerItem.state = showPowerInMenuBar ? .on : .off
         togglePowerItem.tag = 400
         menu.addItem(togglePowerItem)
+
+        let toggleBatteryItem = NSMenuItem(
+            title: "Show Battery Icon",
+            action: #selector(toggleBatteryDisplay),
+            keyEquivalent: ""
+        )
+        toggleBatteryItem.target = self
+        toggleBatteryItem.state = showBatteryInMenuBar ? .on : .off
+        toggleBatteryItem.tag = 401
+        menu.addItem(toggleBatteryItem)
 
         menu.addItem(NSMenuItem.separator())
 
@@ -772,6 +782,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             if let toggleItem = menu.item(withTag: 400) {
                 toggleItem.state = showPowerInMenuBar ? .on : .off
             }
+            if let toggleItem = menu.item(withTag: 401) {
+                toggleItem.state = showBatteryInMenuBar ? .on : .off
+            }
         }
     }
 
@@ -794,10 +807,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func togglePowerDisplay() {
         showPowerInMenuBar.toggle()
+        syncPreferencesController()
     }
 
     @objc private func toggleBatteryDisplay() {
         showBatteryInMenuBar.toggle()
+        syncPreferencesController()
+    }
+
+    private func syncPreferencesController() {
+        guard let controller = preferencesController else { return }
+        let onUpdate = controller.onUpdate
+        controller.onUpdate = nil
+        controller.showPowerInMenuBar = showPowerInMenuBar
+        controller.showBatteryInMenuBar = showBatteryInMenuBar
+        controller.batteryIconStyle = batteryIconStyle
+        controller.displayMode = displayMode
+        controller.refreshInterval = refreshInterval
+        controller.currentPower = currentReading.systemTotal
+        controller.currentBatteryPercent = currentReading.batteryPercent
+        controller.onUpdate = onUpdate
     }
 
     @objc private func showPreferences() {
@@ -814,11 +843,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
             controller.onUpdate = { [weak self] in
                 guard let self = self, let ctrl = self.preferencesController else { return }
-                self.showPowerInMenuBar = ctrl.showPowerInMenuBar
-                self.showBatteryInMenuBar = ctrl.showBatteryInMenuBar
+                if self.showPowerInMenuBar != ctrl.showPowerInMenuBar {
+                    self.showPowerInMenuBar = ctrl.showPowerInMenuBar
+                } else if self.showBatteryInMenuBar != ctrl.showBatteryInMenuBar {
+                    self.showBatteryInMenuBar = ctrl.showBatteryInMenuBar
+                }
                 self.batteryIconStyle = ctrl.batteryIconStyle
                 self.displayMode = ctrl.displayMode
                 self.refreshInterval = ctrl.refreshInterval
+                self.syncPreferencesController()
             }
 
             self.preferencesController = controller
@@ -835,13 +868,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             preferencesWindow = window
         } else {
             // Update controller values
-            preferencesController?.showPowerInMenuBar = showPowerInMenuBar
-            preferencesController?.showBatteryInMenuBar = showBatteryInMenuBar
-            preferencesController?.batteryIconStyle = batteryIconStyle
-            preferencesController?.displayMode = displayMode
-            preferencesController?.refreshInterval = refreshInterval
-            preferencesController?.currentPower = currentReading.systemTotal
-            preferencesController?.currentBatteryPercent = currentReading.batteryPercent
+            syncPreferencesController()
         }
 
         preferencesWindow?.makeKeyAndOrderFront(nil)
