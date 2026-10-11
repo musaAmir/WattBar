@@ -11,6 +11,7 @@ import Combine
 import CoreText
 import Foundation
 import IOKit.ps
+import Sparkle
 import SwiftUI
 
 // MARK: - Main App
@@ -36,11 +37,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var preferencesWindow: NSWindow?
     private var preferencesController: PreferencesController?
 
+    // Sparkle checks the appcast in Info.plist (SUFeedURL) once a day and offers to install new versions
+    private let updaterController = SPUStandardUpdaterController(
+        startingUpdater: true,
+        updaterDelegate: nil,
+        userDriverDelegate: nil
+    )
+
     // Battery image cache to avoid regenerating on every update
     private var cachedBatteryImage: NSImage?
     private var cachedBatteryPercent: Int = -1
     private var cachedBatteryIsCharging: Bool = false
     private var cachedBatteryIconStyle: BatteryIconStyle = .dark
+    private var cachedBatteryShowsPercent: Bool = true
 
     // Cache for last displayed power value to skip unnecessary string formatting
     private var lastDisplayedPowerValue: Float = -1
@@ -58,22 +67,43 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // User preferences
     private var showPowerInMenuBar: Bool {
         didSet {
+            // Refuse to hide the last visible item, otherwise the app becomes unreachable
+            if !anyMenuBarItemEnabled { showPowerInMenuBar = true }
             UserDefaults.standard.set(showPowerInMenuBar, forKey: "showPowerInMenuBar")
-            ensureAtLeastOneVisible(changed: .power)
-            updateStatusItemVisibility()
-            updateMenuCheckmarks()
-            updateDisplay()
+            menuBarItemsChanged()
         }
     }
 
-    private var showBatteryInMenuBar: Bool {
+    private var showBatteryIcon: Bool {
         didSet {
-            UserDefaults.standard.set(showBatteryInMenuBar, forKey: "showBatteryInMenuBar")
-            ensureAtLeastOneVisible(changed: .battery)
-            updateStatusItemVisibility()
-            updateMenuCheckmarks()
-            updateDisplay()
+            if !anyMenuBarItemEnabled { showBatteryIcon = true }
+            UserDefaults.standard.set(showBatteryIcon, forKey: "showBatteryIcon")
+            menuBarItemsChanged()
         }
+    }
+
+    private var showBatteryPercent: Bool {
+        didSet {
+            if !anyMenuBarItemEnabled { showBatteryPercent = true }
+            UserDefaults.standard.set(showBatteryPercent, forKey: "showBatteryPercent")
+            menuBarItemsChanged()
+        }
+    }
+
+    /// Desktop Macs (Mac mini, iMac, Studio) have no battery, so battery options are hidden there
+    private static let hasBattery: Bool = {
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
+        guard service != 0 else { return false }
+        IOObjectRelease(service)
+        return true
+    }()
+
+    private var showBatteryInMenuBar: Bool {
+        AppDelegate.hasBattery && (showBatteryIcon || showBatteryPercent)
+    }
+
+    private var anyMenuBarItemEnabled: Bool {
+        showPowerInMenuBar || showBatteryInMenuBar
     }
 
     private var batteryIconStyle: BatteryIconStyle {
@@ -100,17 +130,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private enum StatusItemKind {
-        case power
-        case battery
-    }
-
     // MARK: Initialization
 
     override init() {
         // Load saved preferences
-        showPowerInMenuBar = UserDefaults.standard.object(forKey: "showPowerInMenuBar") as? Bool ?? true
-        showBatteryInMenuBar = UserDefaults.standard.object(forKey: "showBatteryInMenuBar") as? Bool ?? false
+        let defaults = UserDefaults.standard
+        // Older versions had a single "showBatteryInMenuBar" toggle; use it as the default for both new ones
+        let legacyShowBattery = defaults.object(forKey: "showBatteryInMenuBar") as? Bool ?? false
+        let showIcon = defaults.object(forKey: "showBatteryIcon") as? Bool ?? legacyShowBattery
+        let showPercent = defaults.object(forKey: "showBatteryPercent") as? Bool ?? legacyShowBattery
+        let showPower = defaults.object(forKey: "showPowerInMenuBar") as? Bool ?? true
+        showBatteryIcon = showIcon
+        showBatteryPercent = showPercent
+        showPowerInMenuBar = showPower || !(AppDelegate.hasBattery && (showIcon || showPercent))
 
         if let savedMode = UserDefaults.standard.string(forKey: "displayMode"),
            let mode = DisplayMode(rawValue: savedMode) {
@@ -141,7 +173,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: Application Lifecycle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        setupStatusItems()
+        quitOtherRunningInstances()
+        updateStatusItemVisibility()
         startTimer()
         setupPowerSourceNotifications()
     }
@@ -150,32 +183,55 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         timer?.invalidate()
     }
 
-    // MARK: Status Items Setup
-
-    private func setupStatusItems() {
-        // Power status item
-        powerStatusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let button = powerStatusItem?.button {
-            button.title = "-- W"
-            button.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
-            button.wantsLayer = false
+    /// Two copies running at once (e.g. a login item plus an Xcode build) means two sets of menu bar icons.
+    /// The newest launch wins so rebuilding from Xcode replaces the old copy.
+    private func quitOtherRunningInstances() {
+        guard let bundleID = Bundle.main.bundleIdentifier else { return }
+        for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+        where app != NSRunningApplication.current {
+            app.terminate()
         }
-        buildPowerMenu()
-
-        // Battery status item
-        batteryStatusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let button = batteryStatusItem?.button {
-            button.wantsLayer = false
-        }
-        updateBatteryStatusItem(percent: currentReading.batteryPercent, isCharging: currentReading.isCharging)
-        buildBatteryMenu()
-
-        updateStatusItemVisibility()
     }
 
+    // MARK: Status Items Setup
+
+    private func menuBarItemsChanged() {
+        updateStatusItemVisibility()
+        updateMenuCheckmarks()
+        updateDisplay()
+    }
+
+    /// Creates or removes status items to match the preferences.
+    /// Items are removed rather than hidden with `isVisible`, because macOS 26+ also uses that flag
+    /// for items the user hid in System Settings > Menu Bar, and the two fight each other.
     private func updateStatusItemVisibility() {
-        powerStatusItem?.isVisible = showPowerInMenuBar
-        batteryStatusItem?.isVisible = showBatteryInMenuBar
+        if showPowerInMenuBar, powerStatusItem == nil {
+            let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+            // A stable name lets macOS remember this item (position, visibility) across launches
+            // instead of tracking anonymous "Item-0"/"Item-1" entries that pile up as duplicates
+            item.autosaveName = "WattBarPower"
+            if let button = item.button {
+                button.title = "-- W"
+                button.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+            }
+            powerStatusItem = item
+            buildPowerMenu()
+        } else if !showPowerInMenuBar, let item = powerStatusItem {
+            NSStatusBar.system.removeStatusItem(item)
+            powerStatusItem = nil
+        }
+
+        if showBatteryInMenuBar, batteryStatusItem == nil {
+            let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+            item.autosaveName = "WattBarBattery"
+            batteryStatusItem = item
+            cachedBatteryImage = nil
+            buildBatteryMenu()
+            updateBatteryStatusItem(percent: currentReading.batteryPercent, isCharging: currentReading.isCharging)
+        } else if !showBatteryInMenuBar, let item = batteryStatusItem {
+            NSStatusBar.system.removeStatusItem(item)
+            batteryStatusItem = nil
+        }
     }
 
     // MARK: Power Menu
@@ -228,18 +284,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
-        // Toggle battery display
-        let toggleBatteryItem = NSMenuItem(
-            title: "Show Battery Icon",
-            action: #selector(toggleBatteryDisplay),
-            keyEquivalent: ""
-        )
-        toggleBatteryItem.target = self
-        toggleBatteryItem.state = showBatteryInMenuBar ? .on : .off
-        toggleBatteryItem.tag = 400
-        menu.addItem(toggleBatteryItem)
+        addMenuBarToggles(to: menu)
 
         menu.addItem(NSMenuItem.separator())
+
+        let updatesItem = NSMenuItem(
+            title: "Check for Updates...",
+            action: #selector(checkForUpdates),
+            keyEquivalent: ""
+        )
+        updatesItem.target = self
+        menu.addItem(updatesItem)
 
         // Preferences
         let prefsItem = NSMenuItem(
@@ -300,28 +355,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
-        // Toggle power display
-        let togglePowerItem = NSMenuItem(
-            title: "Show Power Usage",
-            action: #selector(togglePowerDisplay),
-            keyEquivalent: ""
-        )
-        togglePowerItem.target = self
-        togglePowerItem.state = showPowerInMenuBar ? .on : .off
-        togglePowerItem.tag = 400
-        menu.addItem(togglePowerItem)
-
-        let toggleBatteryItem = NSMenuItem(
-            title: "Show Battery Icon",
-            action: #selector(toggleBatteryDisplay),
-            keyEquivalent: ""
-        )
-        toggleBatteryItem.target = self
-        toggleBatteryItem.state = showBatteryInMenuBar ? .on : .off
-        toggleBatteryItem.tag = 401
-        menu.addItem(toggleBatteryItem)
+        addMenuBarToggles(to: menu)
 
         menu.addItem(NSMenuItem.separator())
+
+        let updatesItem = NSMenuItem(
+            title: "Check for Updates...",
+            action: #selector(checkForUpdates),
+            keyEquivalent: ""
+        )
+        updatesItem.target = self
+        menu.addItem(updatesItem)
 
         // Preferences
         let prefsItem = NSMenuItem(
@@ -344,6 +388,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(quitItem)
 
         batteryStatusItem?.menu = menu
+    }
+
+    // MARK: Menu Bar Toggles
+
+    private func addMenuBarToggles(to menu: NSMenu) {
+        let toggles: [(String, Selector, Int)] = [
+            ("Show Power Usage", #selector(togglePowerDisplay), 400),
+            ("Show Battery Icon", #selector(toggleBatteryIcon), 401),
+            ("Show Battery Percentage", #selector(toggleBatteryPercent), 402)
+        ]
+        for (title, action, tag) in toggles {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.target = self
+            item.tag = tag
+            item.isHidden = tag != 400 && !AppDelegate.hasBattery
+            menu.addItem(item)
+        }
+        updateMenuBarToggleCheckmarks(in: menu)
+    }
+
+    private func updateMenuBarToggleCheckmarks(in menu: NSMenu) {
+        menu.item(withTag: 400)?.state = showPowerInMenuBar ? .on : .off
+        menu.item(withTag: 401)?.state = showBatteryIcon ? .on : .off
+        menu.item(withTag: 402)?.state = showBatteryPercent ? .on : .off
     }
 
     // MARK: Timer
@@ -463,39 +531,48 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func ensureAtLeastOneVisible(changed: StatusItemKind) {
-        guard !showPowerInMenuBar && !showBatteryInMenuBar else { return }
-
-        switch changed {
-        case .power:
-            showBatteryInMenuBar = true
-        case .battery:
-            showPowerInMenuBar = true
-        }
-    }
-
     // MARK: Battery Icon
 
     private func updateBatteryStatusItem(percent: Int, isCharging: Bool) {
         guard let button = batteryStatusItem?.button else { return }
         let clampedPercent = max(0, min(percent, 100))
-        button.imagePosition = .imageOnly
-        button.title = ""
 
-        // Only regenerate image if battery state has changed (saves CPU/GPU work)
-        let needsNewImage = cachedBatteryImage == nil
-            || cachedBatteryPercent != clampedPercent
-            || cachedBatteryIsCharging != isCharging
-            || cachedBatteryIconStyle != batteryIconStyle
+        if !showBatteryIcon {
+            // Percentage only: plain text, like the power reading
+            cachedBatteryImage = nil
+            button.image = nil
+            button.imagePosition = .noImage
+            button.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+            let newTitle = isCharging ? "\(clampedPercent)% ⚡︎" : "\(clampedPercent)%"
+            if button.title != newTitle {
+                button.title = newTitle
+            }
+        } else {
+            button.imagePosition = .imageOnly
+            button.title = ""
 
-        if needsNewImage {
-            let newImage = makeBatteryStatusImage(percent: clampedPercent, isCharging: isCharging, style: batteryIconStyle)
-            cachedBatteryImage = newImage
-            cachedBatteryPercent = clampedPercent
-            cachedBatteryIsCharging = isCharging
-            cachedBatteryIconStyle = batteryIconStyle
-            button.image = newImage
-            button.needsDisplay = true
+            // Only regenerate image if battery state has changed (saves CPU/GPU work)
+            let needsNewImage = cachedBatteryImage == nil
+                || cachedBatteryPercent != clampedPercent
+                || cachedBatteryIsCharging != isCharging
+                || cachedBatteryIconStyle != batteryIconStyle
+                || cachedBatteryShowsPercent != showBatteryPercent
+
+            if needsNewImage {
+                let newImage = makeBatteryStatusImage(
+                    percent: clampedPercent,
+                    isCharging: isCharging,
+                    style: batteryIconStyle,
+                    showPercent: showBatteryPercent
+                )
+                cachedBatteryImage = newImage
+                cachedBatteryPercent = clampedPercent
+                cachedBatteryIsCharging = isCharging
+                cachedBatteryIconStyle = batteryIconStyle
+                cachedBatteryShowsPercent = showBatteryPercent
+                button.image = newImage
+                button.needsDisplay = true
+            }
         }
 
         let statusText = isCharging ? "Charging" : "On Battery"
@@ -503,12 +580,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         button.setAccessibilityLabel("Battery \(clampedPercent)% - \(statusText)")
     }
 
-    private func makeBatteryStatusImage(percent: Int, isCharging: Bool, style: BatteryIconStyle) -> NSImage {
+    private func makeBatteryStatusImage(percent: Int, isCharging: Bool, style: BatteryIconStyle, showPercent: Bool) -> NSImage {
         let scale: CGFloat = 0.85
         let fontSize: CGFloat = 11.5 * scale
         let font = NSFont.monospacedDigitSystemFont(ofSize: fontSize, weight: .medium)
 
-        let text = "\(percent)"
+        let text = showPercent ? "\(percent)" : ""
 
         // Determine fill level using discrete steps matching actual percentage
         let discreteFillPercent: CGFloat
@@ -764,9 +841,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
 
-            if let toggleItem = menu.item(withTag: 400) {
-                toggleItem.state = showBatteryInMenuBar ? .on : .off
-            }
+            updateMenuBarToggleCheckmarks(in: menu)
         }
 
         // Update battery menu checkmarks
@@ -779,12 +854,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                 }
             }
-            if let toggleItem = menu.item(withTag: 400) {
-                toggleItem.state = showPowerInMenuBar ? .on : .off
-            }
-            if let toggleItem = menu.item(withTag: 401) {
-                toggleItem.state = showBatteryInMenuBar ? .on : .off
-            }
+            updateMenuBarToggleCheckmarks(in: menu)
         }
     }
 
@@ -810,8 +880,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         syncPreferencesController()
     }
 
-    @objc private func toggleBatteryDisplay() {
-        showBatteryInMenuBar.toggle()
+    @objc private func toggleBatteryIcon() {
+        showBatteryIcon.toggle()
+        syncPreferencesController()
+    }
+
+    @objc private func toggleBatteryPercent() {
+        showBatteryPercent.toggle()
         syncPreferencesController()
     }
 
@@ -820,7 +895,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let onUpdate = controller.onUpdate
         controller.onUpdate = nil
         controller.showPowerInMenuBar = showPowerInMenuBar
-        controller.showBatteryInMenuBar = showBatteryInMenuBar
+        controller.showBatteryIcon = showBatteryIcon
+        controller.showBatteryPercent = showBatteryPercent
         controller.batteryIconStyle = batteryIconStyle
         controller.displayMode = displayMode
         controller.refreshInterval = refreshInterval
@@ -833,20 +909,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if preferencesWindow == nil {
             let controller = PreferencesController(
                 showPower: showPowerInMenuBar,
-                showBattery: showBatteryInMenuBar,
+                showBatteryIcon: showBatteryIcon,
+                showBatteryPercent: showBatteryPercent,
                 iconStyle: batteryIconStyle,
                 displayMode: displayMode,
                 refreshInterval: refreshInterval
             )
+            controller.hasBattery = AppDelegate.hasBattery
             controller.currentPower = currentReading.systemTotal
             controller.currentBatteryPercent = currentReading.batteryPercent
 
             controller.onUpdate = { [weak self] in
                 guard let self = self, let ctrl = self.preferencesController else { return }
+                // Only assign the toggle that changed, so the "keep one item visible" rule applies to it
                 if self.showPowerInMenuBar != ctrl.showPowerInMenuBar {
                     self.showPowerInMenuBar = ctrl.showPowerInMenuBar
-                } else if self.showBatteryInMenuBar != ctrl.showBatteryInMenuBar {
-                    self.showBatteryInMenuBar = ctrl.showBatteryInMenuBar
+                } else if self.showBatteryIcon != ctrl.showBatteryIcon {
+                    self.showBatteryIcon = ctrl.showBatteryIcon
+                } else if self.showBatteryPercent != ctrl.showBatteryPercent {
+                    self.showBatteryPercent = ctrl.showBatteryPercent
                 }
                 self.batteryIconStyle = ctrl.batteryIconStyle
                 self.displayMode = ctrl.displayMode
@@ -873,6 +954,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         preferencesWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func checkForUpdates() {
+        NSApp.activate(ignoringOtherApps: true)
+        updaterController.checkForUpdates(nil)
     }
 
     @objc private func quitApp() {

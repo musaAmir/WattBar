@@ -1,8 +1,27 @@
+# macOS
 .DS_Store
+.AppleDouble
+.LSOverride
+
+# Xcode
+build/
 .build/
-.claude/
-WattBar Old
-WattBar.xcodeproj/xcuserdata/
-WattBar.xcodeproj/project.xcworkspace/xcuserdata/
+DerivedData/
 *.xcuserstate
+*.xcscmblueprint
+xcuserdata/
+
+# Syncthing temp files
+.syncthing.*
+
+# Claude Code
+.claude/
+
+# Compiled binary (in root, not the source folder)
+/WattBar
+!/WattBar/
+
+# Old compiled binaries from swiftc builds
+/WattBarApp
+WattBar Old
 *.xcuserstate.tmp

@@ -19,18 +19,23 @@ struct PreferencesView: View {
 
                 card("Menu Bar") {
                     toggleRow("Show Power Usage", isOn: $controller.showPowerInMenuBar)
-                    toggleRow("Show Battery Icon", isOn: $controller.showBatteryInMenuBar)
+                    if controller.hasBattery {
+                        toggleRow("Show Battery Icon", isOn: $controller.showBatteryIcon)
+                        toggleRow("Show Battery Percentage", isOn: $controller.showBatteryPercent)
+                    }
                 }
 
-                card("Battery Icon") {
-                    row("Style") {
-                        Picker("", selection: $controller.batteryIconStyle) {
-                            ForEach(BatteryIconStyle.allCases, id: \.self) { style in
-                                Text(style.label).tag(style)
+                if controller.hasBattery {
+                    card("Battery Icon") {
+                        row("Style") {
+                            Picker("", selection: $controller.batteryIconStyle) {
+                                ForEach(BatteryIconStyle.allCases, id: \.self) { style in
+                                    Text(style.label).tag(style)
+                                }
                             }
+                            .labelsHidden()
+                            .pickerStyle(.segmented)
                         }
-                        .labelsHidden()
-                        .pickerStyle(.segmented)
                     }
                 }
 
@@ -170,7 +175,10 @@ class PreferencesController: ObservableObject {
     @Published var showPowerInMenuBar: Bool {
         didSet { onUpdate?() }
     }
-    @Published var showBatteryInMenuBar: Bool {
+    @Published var showBatteryIcon: Bool {
+        didSet { onUpdate?() }
+    }
+    @Published var showBatteryPercent: Bool {
         didSet { onUpdate?() }
     }
     @Published var batteryIconStyle: BatteryIconStyle {
@@ -184,18 +192,21 @@ class PreferencesController: ObservableObject {
     }
     @Published var currentPower: Float = 0
     @Published var currentBatteryPercent: Int = 0
+    var hasBattery = true
 
     var onUpdate: (() -> Void)?
 
     init(
         showPower: Bool,
-        showBattery: Bool,
+        showBatteryIcon: Bool,
+        showBatteryPercent: Bool,
         iconStyle: BatteryIconStyle,
         displayMode: DisplayMode,
         refreshInterval: RefreshInterval
     ) {
         self.showPowerInMenuBar = showPower
-        self.showBatteryInMenuBar = showBattery
+        self.showBatteryIcon = showBatteryIcon
+        self.showBatteryPercent = showBatteryPercent
         self.batteryIconStyle = iconStyle
         self.displayMode = displayMode
         self.refreshInterval = refreshInterval

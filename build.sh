@@ -1,22 +1,16 @@
 #!/bin/bash
 
 # Clean rebuild script for WattBar
+# Uses xcodebuild (not swiftc) because the app depends on the Sparkle package
 
 echo "Building WattBar..."
 
-swiftc -o WattBarApp \
-    -framework Cocoa \
-    -framework SwiftUI \
-    -framework Combine \
-    -framework IOKit \
-    WattBar/PowerData.swift \
-    WattBar/PreferencesView.swift \
-    WattBar/WattBarApp.swift \
-    WattBar/SMC.swift
+xcodebuild -project WattBar.xcodeproj -scheme WattBar -configuration Release \
+    -derivedDataPath build/DerivedData -quiet
 
 if [ $? -eq 0 ]; then
     echo "✅ Build successful!"
-    echo "Run with: ./WattBarApp"
+    echo "Run with: open build/DerivedData/Build/Products/Release/WattBar.app"
 else
     echo "❌ Build failed"
     exit 1
