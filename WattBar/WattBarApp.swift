@@ -554,6 +554,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let button = batteryStatusItem?.button else { return }
         guard let percent else {
             button.image = nil
+            button.imagePosition = .noImage
+            button.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+            button.toolTip = "Battery percentage unavailable"
             button.title = "—%"
             button.setAccessibilityLabel("Battery percentage unavailable")
             cachedBatteryImage = nil
