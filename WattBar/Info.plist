@@ -28,5 +28,9 @@
 	<string>MqwjC1A27v24Tij7GEQ9fuHHBiK7qiA/z/raO+NHPWg=</string>
 	<key>SUEnableAutomaticChecks</key>
 	<true/>
+    <key>SURequireSignedFeed</key><true/>
+    <key>SUVerifyUpdateBeforeExtraction</key><true/>
+    <key>SUAutomaticallyUpdate</key><false/>
+    <key>SUEnableSystemProfiling</key><false/>
 </dict>
 </plist>

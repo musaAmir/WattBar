@@ -25,3 +25,7 @@ xcuserdata/
 /WattBarApp
 WattBar Old
 *.xcuserstate.tmp
+
+# Python test caches
+__pycache__/
+*.pyc

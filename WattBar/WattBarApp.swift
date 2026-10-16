@@ -17,17 +17,20 @@ import SwiftUI
 // MARK: - Main App
 
 @main
-struct WattBarApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-
-    var body: some Scene {
-        Settings { EmptyView() }
+enum WattBarApp {
+    static func main() {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+        let delegate = AppDelegate()
+        app.delegate = delegate
+        // SwiftUI is created only if Preferences is opened.
+        withExtendedLifetime(delegate) { app.run() }
     }
 }
 
 // MARK: - App Delegate
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // MARK: Properties
 
@@ -51,18 +54,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var cachedBatteryIconStyle: BatteryIconStyle = .dark
     private var cachedBatteryShowsPercent: Bool = true
 
-    // Cache for last displayed power value to skip unnecessary string formatting
-    private var lastDisplayedPowerValue: Float = -1
-
-    private var currentReading: PowerReading = .zero {
-        didSet {
-            if oldValue.isCharging != currentReading.isCharging {
-                DispatchQueue.main.async { [weak self] in
-                    self?.updateDisplay()
-                }
-            }
-        }
-    }
+    private var currentReading: PowerReading = .unavailable
+    private let sensorQueue = DispatchQueue(label: "com.wattbar.sensors", qos: .utility)
+    private var readInFlight = false
+    private var isSleeping = false
+    private var isTerminating = false
+    private var powerSourceRunLoopSource: CFRunLoopSource?
+    private var workspaceObservers: [NSObjectProtocol] = []
 
     // User preferences
     private var showPowerInMenuBar: Bool {
@@ -94,8 +92,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private static let hasBattery: Bool = {
         let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
         guard service != 0 else { return false }
-        IOObjectRelease(service)
-        return true
+        defer { IOObjectRelease(service) }
+        let installed = IORegistryEntryCreateCFProperty(service, "BatteryInstalled" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? Bool
+        let capacity = IORegistryEntryCreateCFProperty(service, "MaxCapacity" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? NSNumber
+        return PowerReading.hasBattery(installed: installed, maximumCapacity: capacity?.doubleValue)
     }()
 
     private var showBatteryInMenuBar: Bool {
@@ -108,6 +108,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var batteryIconStyle: BatteryIconStyle {
         didSet {
+            guard oldValue != batteryIconStyle else { return }
             UserDefaults.standard.set(batteryIconStyle.rawValue, forKey: "batteryIconStyle")
             updateMenuCheckmarks()
             updateDisplay()
@@ -116,6 +117,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var displayMode: DisplayMode {
         didSet {
+            guard oldValue != displayMode else { return }
             UserDefaults.standard.set(displayMode.rawValue, forKey: "displayMode")
             updateMenuCheckmarks()
             updateDisplay()
@@ -124,6 +126,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var refreshInterval: RefreshInterval {
         didSet {
+            guard oldValue != refreshInterval else { return }
             UserDefaults.standard.set(refreshInterval.rawValue, forKey: "refreshInterval")
             restartTimer()
             updateMenuCheckmarks()
@@ -146,7 +149,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         if let savedMode = UserDefaults.standard.string(forKey: "displayMode"),
            let mode = DisplayMode(rawValue: savedMode) {
-            displayMode = mode
+            displayMode = AppDelegate.hasBattery ? mode : .systemTotal
         } else {
             displayMode = .systemTotal
         }
@@ -177,10 +180,34 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         updateStatusItemVisibility()
         startTimer()
         setupPowerSourceNotifications()
+        let center = NSWorkspace.shared.notificationCenter
+        workspaceObservers = [
+            center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+                self?.isSleeping = true
+                self?.timer?.invalidate()
+                self?.timer = nil
+            },
+            center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+                guard let self else { return }
+                self.isSleeping = false
+                self.sensorQueue.async { SMC.shared.close() }
+                self.startTimer()
+            }
+        ]
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showPreferences()
+        return false
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        isTerminating = true
         timer?.invalidate()
+        workspaceObservers.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }
+        if let source = powerSourceRunLoopSource { CFRunLoopSourceInvalidate(source) }
+        powerSourceRunLoopSource = nil
+        sensorQueue.async { SMC.shared.close() }
     }
 
     /// Two copies running at once (e.g. a login item plus an Xcode build) means two sets of menu bar icons.
@@ -238,6 +265,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func buildPowerMenu() {
         let menu = NSMenu()
+        menu.autoenablesItems = false
 
         // Current reading display
         let readingItem = NSMenuItem(title: "Power: -- W", action: nil, keyEquivalent: "")
@@ -248,6 +276,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Display mode submenu
         let displayMenu = NSMenu()
+        displayMenu.autoenablesItems = false
         for mode in DisplayMode.allCases {
             let item = NSMenuItem(
                 title: mode.label,
@@ -255,6 +284,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 keyEquivalent: ""
             )
             item.target = self
+            item.isEnabled = mode != .battery || AppDelegate.hasBattery
             item.representedObject = mode
             item.state = mode == displayMode ? .on : .off
             displayMenu.addItem(item)
@@ -417,6 +447,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: Timer
 
     private func startTimer() {
+        guard !isSleeping, !isTerminating else { return }
         let interval = max(1.0, refreshInterval.rawValue)
         let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             self?.refreshReading()
@@ -439,23 +470,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func refreshReading() {
-        // Use .utility QoS for energy efficiency - this is background monitoring work,
-        // not user-initiated interactive work that needs immediate response
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            let data = SMC.shared.readPowerData()
-
-            let reading = PowerReading(
-                systemTotal: Float(data.systemWatts),
-                batteryRate: Float(data.batteryWatts),
-                deliveryRate: 0,
-                batteryPercent: data.batteryPercent,
-                isCharging: data.isCharging,
-                timestamp: Date()
-            )
-
-            DispatchQueue.main.async {
-                self?.currentReading = reading
-                self?.updateDisplay()
+        // A notification and timer can coincide. Keep at most one sensor read queued.
+        guard !readInFlight, !isSleeping, !isTerminating else { return }
+        readInFlight = true
+        sensorQueue.async { [weak self] in
+            let reading = SMC.shared.readPowerData()
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.readInFlight = false
+                guard !self.isSleeping, !self.isTerminating else { return }
+                self.currentReading = reading
+                self.updateDisplay()
             }
         }
     }
@@ -468,8 +493,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let context = Unmanaged.passUnretained(self).toOpaque()
-        let runLoopSource = IOPSNotificationCreateRunLoopSource(callback, context).takeRetainedValue()
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, CFRunLoopMode.commonModes)
+        guard let source = IOPSNotificationCreateRunLoopSource(callback, context)?.takeRetainedValue() else { return }
+        powerSourceRunLoopSource = source
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, CFRunLoopMode.commonModes)
     }
 
     @objc private func powerSourceChanged() {
@@ -487,20 +513,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Update power status item
         if showPowerInMenuBar {
-            let value: Float
-            let prefix: String
-
-            switch displayMode {
-            case .systemTotal:
-                value = currentReading.systemTotal
-                prefix = ""
-            case .battery:
-                value = currentReading.batteryRate
-                prefix = ""
-            }
-
-            let formattedValue = String(format: "%.1f", value)
-            let newTitle = "\(prefix)\(formattedValue)W"
+            let value = displayMode == .systemTotal ? currentReading.systemTotal : currentReading.batteryRate
+            let newTitle = PowerReading.watts(value)
+            powerStatusItem?.button?.setAccessibilityLabel("\(displayMode.label): \(newTitle)")
+            powerStatusItem?.button?.toolTip = value == nil ? "This power sensor is unavailable on this Mac." : displayMode.label
 
             if powerStatusItem?.button?.title != newTitle {
                 powerStatusItem?.button?.title = newTitle
@@ -510,7 +526,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // Update power menu reading item
             if let menu = powerStatusItem?.menu,
                let readingItem = menu.item(withTag: 100) {
-                readingItem.title = "System: \(String(format: "%.1f", currentReading.systemTotal))W | Battery: \(String(format: "%.1f", currentReading.batteryRate))W"
+                readingItem.title = "System: \(PowerReading.watts(currentReading.systemTotal))" +
+                    (AppDelegate.hasBattery ? " | Battery: \(PowerReading.watts(currentReading.batteryRate))" : "")
             }
         }
 
@@ -522,10 +539,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // Update battery menu items
             if let menu = batteryStatusItem?.menu {
                 if let batteryItem = menu.item(withTag: 100) {
-                    batteryItem.title = "Battery: \(percent)%"
+                    batteryItem.title = "Battery: \(percent.map { "\($0)%" } ?? "Unavailable")"
                 }
                 if let chargingItem = menu.item(withTag: 101) {
-                    chargingItem.title = currentReading.isCharging ? "Status: Charging" : "Status: On Battery"
+                    chargingItem.title = "Status: \(currentReading.batteryStatus)"
                 }
             }
         }
@@ -533,8 +550,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: Battery Icon
 
-    private func updateBatteryStatusItem(percent: Int, isCharging: Bool) {
+    private func updateBatteryStatusItem(percent: Int?, isCharging: Bool) {
         guard let button = batteryStatusItem?.button else { return }
+        guard let percent else {
+            button.image = nil
+            button.title = "—%"
+            button.setAccessibilityLabel("Battery percentage unavailable")
+            cachedBatteryImage = nil
+            return
+        }
         let clampedPercent = max(0, min(percent, 100))
 
         if !showBatteryIcon {
@@ -575,7 +599,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        let statusText = isCharging ? "Charging" : "On Battery"
+        let statusText = currentReading.batteryStatus
         button.toolTip = "Battery \(clampedPercent)% - \(statusText)"
         button.setAccessibilityLabel("Battery \(clampedPercent)% - \(statusText)")
     }
@@ -863,16 +887,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func displayModeSelected(_ sender: NSMenuItem) {
         guard let mode = sender.representedObject as? DisplayMode else { return }
         displayMode = mode
+        syncPreferencesController()
     }
 
     @objc private func refreshIntervalSelected(_ sender: NSMenuItem) {
         guard let interval = sender.representedObject as? RefreshInterval else { return }
         refreshInterval = interval
+        syncPreferencesController()
     }
 
     @objc private func batteryIconStyleSelected(_ sender: NSMenuItem) {
         guard let style = sender.representedObject as? BatteryIconStyle else { return }
         batteryIconStyle = style
+        syncPreferencesController()
     }
 
     @objc private func togglePowerDisplay() {
@@ -900,6 +927,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         controller.batteryIconStyle = batteryIconStyle
         controller.displayMode = displayMode
         controller.refreshInterval = refreshInterval
+        controller.automaticUpdateChecks = updaterController.updater.automaticallyChecksForUpdates
         controller.currentPower = currentReading.systemTotal
         controller.currentBatteryPercent = currentReading.batteryPercent
         controller.onUpdate = onUpdate
@@ -915,6 +943,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 displayMode: displayMode,
                 refreshInterval: refreshInterval
             )
+            controller.automaticUpdateChecks = updaterController.updater.automaticallyChecksForUpdates
             controller.hasBattery = AppDelegate.hasBattery
             controller.currentPower = currentReading.systemTotal
             controller.currentBatteryPercent = currentReading.batteryPercent
@@ -928,6 +957,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     self.showBatteryIcon = ctrl.showBatteryIcon
                 } else if self.showBatteryPercent != ctrl.showBatteryPercent {
                     self.showBatteryPercent = ctrl.showBatteryPercent
+                }
+                if self.updaterController.updater.automaticallyChecksForUpdates != ctrl.automaticUpdateChecks {
+                    self.updaterController.updater.automaticallyChecksForUpdates = ctrl.automaticUpdateChecks
                 }
                 self.batteryIconStyle = ctrl.batteryIconStyle
                 self.displayMode = ctrl.displayMode
@@ -943,6 +975,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let window = NSWindow(contentViewController: hostingController)
             window.title = "WattBar Preferences"
             window.styleMask = [.titled, .closable]
+            window.isReleasedWhenClosed = false
+            window.delegate = self
             window.setContentSize(NSSize(width: 380, height: 480))
             window.center()
 
@@ -954,6 +988,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         preferencesWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard notification.object as? NSWindow === preferencesWindow else { return }
+        preferencesWindow = nil
+        preferencesController = nil
     }
 
     @objc private func checkForUpdates() {

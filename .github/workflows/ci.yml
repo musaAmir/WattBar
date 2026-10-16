@@ -1,0 +1,20 @@
+name: Build and test
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Test sensor decoding and power readings
+        run: swift test
+      - name: Test release metadata
+        run: python3 -m unittest discover -s Tests/ReleaseScripts
+      - name: Build Apple silicon and Intel app
+        run: ./build.sh release universal
+      - name: Verify packaged Sparkle and signed updates
+        run: Tests/ReleaseScripts/smoke-sparkle.sh

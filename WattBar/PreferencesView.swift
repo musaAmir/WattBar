@@ -10,7 +10,10 @@ import ServiceManagement
 
 struct PreferencesView: View {
     @ObservedObject var controller: PreferencesController
-    @State private var launchAtLogin = false
+    @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
+    @State private var loginError: String?
+    @State private var requiresLoginApproval = false
+    @Environment(\.controlActiveState) private var controlActiveState
 
     var body: some View {
         ScrollView {
@@ -28,7 +31,7 @@ struct PreferencesView: View {
                 if controller.hasBattery {
                     card("Battery Icon") {
                         row("Style") {
-                            Picker("", selection: $controller.batteryIconStyle) {
+                            Picker("Battery Icon Style", selection: $controller.batteryIconStyle) {
                                 ForEach(BatteryIconStyle.allCases, id: \.self) { style in
                                     Text(style.label).tag(style)
                                 }
@@ -40,18 +43,19 @@ struct PreferencesView: View {
                 }
 
                 card("Power") {
-                    row("Display Mode") {
-                        Picker("", selection: $controller.displayMode) {
-                            ForEach(DisplayMode.allCases, id: \.self) { mode in
-                                Text(mode.label).tag(mode)
+                    if controller.hasBattery {
+                        row("Display Mode") {
+                            Picker("Display Mode", selection: $controller.displayMode) {
+                                ForEach(DisplayMode.allCases, id: \.self) { mode in
+                                    Text(mode.label).tag(mode)
+                                }
                             }
+                            .labelsHidden()
+                            .pickerStyle(.segmented)
                         }
-                        .labelsHidden()
-                        .pickerStyle(.segmented)
                     }
-
                     row("Refresh Rate") {
-                        Picker("", selection: $controller.refreshInterval) {
+                        Picker("Refresh Rate", selection: $controller.refreshInterval) {
                             ForEach(RefreshInterval.allCases, id: \.self) { interval in
                                 Text(interval.label).tag(interval)
                             }
@@ -62,24 +66,32 @@ struct PreferencesView: View {
                 }
 
                 card("General") {
-                    toggleRow("Launch at Login", isOn: $launchAtLogin)
-                        .onChange(of: launchAtLogin) { newValue in
-                            setLaunchAtLogin(newValue)
-                        }
+                    toggleRow("Check for Updates Automatically", isOn: $controller.automaticUpdateChecks)
+                    toggleRow("Launch at Login", isOn: Binding(get: { launchAtLogin }, set: { setLaunchAtLogin($0) }))
                 }
 
+                if requiresLoginApproval {
+                    Button("Allow in Login Items…") { SMAppService.openSystemSettingsLoginItems() }
+                    Text("WattBar needs approval in System Settings to launch at login.")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+                if let loginError { Text(loginError).font(.caption).foregroundColor(.red) }
+
                 card("Current Status") {
-                    statusRow("Power", value: "\(String(format: "%.1f", controller.currentPower))W")
-                    statusRow("Battery", value: "\(controller.currentBatteryPercent)%")
+                    statusRow("System Power", value: PowerReading.watts(controller.currentPower))
+                    if controller.hasBattery {
+                        statusRow("Battery", value: controller.currentBatteryPercent.map { "\($0)%" } ?? "Unavailable")
+                    }
+                    Text("Sensor availability varies by Mac. A dash means no reading is available.")
+                        .font(.caption).foregroundColor(.secondary)
                 }
             }
             .padding(20)
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .frame(width: 380, height: 480)
-        .onAppear {
-            launchAtLogin = getLaunchAtLogin()
-        }
+        .onAppear { refreshLoginStatus() }
+        .onChange(of: controlActiveState) { _ in refreshLoginStatus() }
     }
 
     private var header: some View {
@@ -123,8 +135,9 @@ struct PreferencesView: View {
         HStack {
             Text(title)
             Spacer()
-            Toggle("", isOn: isOn)
+            Toggle(title, isOn: isOn)
                 .labelsHidden()
+                .accessibilityLabel(title)
         }
     }
 
@@ -148,25 +161,19 @@ struct PreferencesView: View {
     }
 
     private func setLaunchAtLogin(_ enabled: Bool) {
-        if #available(macOS 13.0, *) {
-            do {
-                if enabled {
-                    try SMAppService.mainApp.register()
-                } else {
-                    try SMAppService.mainApp.unregister()
-                }
-            } catch {
-                print("Failed to set launch at login: \(error)")
-            }
-        }
+        loginError = nil
+        do {
+            if enabled { try SMAppService.mainApp.register() }
+            else { try SMAppService.mainApp.unregister() }
+        } catch { loginError = "Couldn’t change Launch at Login: \(error.localizedDescription)" }
+        refreshLoginStatus()
     }
 
-    private func getLaunchAtLogin() -> Bool {
-        if #available(macOS 13.0, *) {
-            return SMAppService.mainApp.status == .enabled
-        }
-        return false
+    private func refreshLoginStatus() {
+        launchAtLogin = SMAppService.mainApp.status == .enabled
+        requiresLoginApproval = SMAppService.mainApp.status == .requiresApproval
     }
+
 }
 
 // MARK: - Preferences Controller
@@ -190,8 +197,11 @@ class PreferencesController: ObservableObject {
     @Published var refreshInterval: RefreshInterval {
         didSet { onUpdate?() }
     }
-    @Published var currentPower: Float = 0
-    @Published var currentBatteryPercent: Int = 0
+    @Published var automaticUpdateChecks = true {
+        didSet { onUpdate?() }
+    }
+    @Published var currentPower: Float?
+    @Published var currentBatteryPercent: Int?
     var hasBattery = true
 
     var onUpdate: (() -> Void)?
