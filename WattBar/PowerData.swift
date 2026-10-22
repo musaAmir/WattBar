@@ -87,3 +87,40 @@ enum RefreshInterval: Double, CaseIterable {
     case oneSecond = 1, twoSeconds = 2, fiveSeconds = 5, tenSeconds = 10
     var label: String { "\(Int(rawValue)) \(self == .oneSecond ? "second" : "seconds")" }
 }
+
+/// A short, bounded history of actual readings. Missing values retain their place
+/// in time so a graph can leave gaps instead of implying measured zero power.
+struct PowerHistory {
+    struct Sample {
+        let date: Date
+        let systemTotal: Float?
+        let batteryRate: Float?
+    }
+
+    static let window: TimeInterval = 60
+    private static let maximumSamples = 120
+    private(set) var samples: [Sample] = []
+
+    mutating func record(_ reading: PowerReading, at date: Date = Date()) {
+        if let latest = samples.last, date < latest.date {
+            samples.removeAll(keepingCapacity: true)
+        }
+        let cutoff = date.addingTimeInterval(-Self.window)
+        samples.removeAll { $0.date < cutoff }
+
+        func valid(_ value: Float?) -> Float? {
+            guard let value, value.isFinite, value >= 0 else { return nil }
+            return value
+        }
+        samples.append(Sample(date: date, systemTotal: valid(reading.systemTotal),
+                              batteryRate: valid(reading.batteryRate)))
+        if samples.count > Self.maximumSamples {
+            samples.removeFirst(samples.count - Self.maximumSamples)
+        }
+    }
+
+    /// Valid measurements for statistics; use `samples` when drawing time gaps.
+    func values(for mode: DisplayMode) -> [Float] {
+        samples.compactMap { mode == .systemTotal ? $0.systemTotal : $0.batteryRate }
+    }
+}

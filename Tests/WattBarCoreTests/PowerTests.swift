@@ -63,3 +63,81 @@ final class PowerTests: XCTestCase {
         XCTAssertEqual(reading().batteryStatus, "On Battery")
     }
 }
+
+final class PowerHistoryTests: XCTestCase {
+    private let start = Date(timeIntervalSince1970: 1_000)
+
+    private func reading(system: Float?, battery: Float?) -> PowerReading {
+        PowerReading(systemTotal: system, batteryRate: battery, batteryPercent: nil,
+                     isCharging: false, isOnExternalPower: false)
+    }
+
+    func testWindowPreservesBoundaryAndRemovesOlderReadings() {
+        var history = PowerHistory()
+        for offset in [0.0, 30.0, 60.0] {
+            history.record(reading(system: Float(offset), battery: nil),
+                           at: start.addingTimeInterval(offset))
+        }
+        XCTAssertEqual(history.values(for: .systemTotal), [0, 30, 60])
+
+        history.record(.unavailable, at: start.addingTimeInterval(60.001))
+        XCTAssertEqual(history.values(for: .systemTotal), [30, 60])
+        XCTAssertEqual(history.samples.count, 3)
+
+        history.record(reading(system: 7, battery: nil), at: start.addingTimeInterval(121))
+        XCTAssertEqual(history.values(for: .systemTotal), [7])
+        XCTAssertEqual(history.samples.count, 1)
+    }
+
+    func testRapidReadingsKeepMemoryBoundedAndRetainNewestSamples() {
+        var history = PowerHistory()
+        for index in 0..<200 {
+            history.record(reading(system: Float(index), battery: nil),
+                           at: start.addingTimeInterval(Double(index) / 10))
+        }
+        XCTAssertEqual(history.samples.count, 120)
+        XCTAssertEqual(history.samples.first?.date, start.addingTimeInterval(8))
+        XCTAssertEqual(history.samples.first?.systemTotal, 80)
+        XCTAssertEqual(history.samples.last?.systemTotal, 199)
+    }
+
+    func testRealZeroAndMissingValuesRemainDistinct() {
+        var history = PowerHistory()
+        history.record(reading(system: 0, battery: 0), at: start)
+        history.record(.unavailable, at: start.addingTimeInterval(1))
+        history.record(reading(system: .nan, battery: .infinity), at: start.addingTimeInterval(2))
+        history.record(reading(system: -1, battery: -.infinity), at: start.addingTimeInterval(3))
+        history.record(reading(system: .infinity, battery: -1), at: start.addingTimeInterval(4))
+
+        XCTAssertEqual(history.samples.count, 5)
+        XCTAssertEqual(history.samples.first?.systemTotal, 0)
+        XCTAssertEqual(history.samples.first?.batteryRate, 0)
+        XCTAssertTrue(history.samples.dropFirst().allSatisfy { $0.systemTotal == nil && $0.batteryRate == nil })
+        XCTAssertEqual(history.values(for: .systemTotal), [0])
+        XCTAssertEqual(history.values(for: .battery), [0])
+    }
+
+    func testDisplayModesKeepIndependentMeasurements() {
+        var history = PowerHistory()
+        history.record(reading(system: 25, battery: 10), at: start)
+        history.record(reading(system: nil, battery: 12), at: start.addingTimeInterval(1))
+        history.record(reading(system: 30, battery: nil), at: start.addingTimeInterval(2))
+
+        XCTAssertEqual(history.values(for: .systemTotal), [25, 30])
+        XCTAssertEqual(history.values(for: .battery), [10, 12])
+        XCTAssertNil(history.samples[1].systemTotal)
+        XCTAssertNil(history.samples[2].batteryRate)
+    }
+
+    func testClockReversalStartsANewHistory() {
+        var history = PowerHistory()
+        history.record(reading(system: 25, battery: 10), at: start)
+        history.record(reading(system: 30, battery: 12), at: start.addingTimeInterval(5))
+        history.record(reading(system: 20, battery: 8), at: start.addingTimeInterval(4))
+
+        XCTAssertEqual(history.samples.count, 1)
+        XCTAssertEqual(history.samples.first?.date, start.addingTimeInterval(4))
+        XCTAssertEqual(history.values(for: .systemTotal), [20])
+        XCTAssertEqual(history.values(for: .battery), [8])
+    }
+}

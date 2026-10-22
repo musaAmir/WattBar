@@ -23,14 +23,14 @@ enum WattBarApp {
         app.setActivationPolicy(.accessory)
         let delegate = AppDelegate()
         app.delegate = delegate
-        // SwiftUI is created only if Preferences is opened.
+        // SwiftUI is created only while a menu or Preferences is open.
         withExtendedLifetime(delegate) { app.run() }
     }
 }
 
 // MARK: - App Delegate
 
-class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
 
     // MARK: Properties
 
@@ -54,6 +54,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var cachedBatteryIconStyle: BatteryIconStyle = .dark
     private var cachedBatteryShowsPercent: Bool = true
 
+    private let dashboardModel = MenuDashboardModel()
     private var currentReading: PowerReading = .unavailable
     private let sensorQueue = DispatchQueue(label: "com.wattbar.sensors", qos: .utility)
     private var readInFlight = false
@@ -190,6 +191,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
                 guard let self else { return }
                 self.isSleeping = false
+                self.dashboardModel.history = PowerHistory()
                 self.sensorQueue.async { SMC.shared.close() }
                 self.startTimer()
             }
@@ -238,7 +240,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // instead of tracking anonymous "Item-0"/"Item-1" entries that pile up as duplicates
             item.autosaveName = "WattBarPower"
             if let button = item.button {
-                button.title = "-- W"
+                button.title = "— W"
+                button.image = menuSymbol("bolt.fill")
+                button.imagePosition = .imageLeading
                 button.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
             }
             powerStatusItem = item
@@ -261,187 +265,147 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    // MARK: Power Menu
+    // MARK: Menus
 
-    private func buildPowerMenu() {
+    private func makeMenu() -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
+        menu.delegate = self
+        let dashboard = NSMenuItem(title: "WattBar", action: nil, keyEquivalent: "")
+        dashboard.tag = 100
+        dashboard.isEnabled = false
+        menu.addItem(dashboard)
+        menu.addItem(.separator())
+        return menu
+    }
 
-        // Current reading display
-        let readingItem = NSMenuItem(title: "Power: -- W", action: nil, keyEquivalent: "")
-        readingItem.tag = 100
-        menu.addItem(readingItem)
+    private func menuSymbol(_ name: String) -> NSImage? {
+        let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
+        image?.isTemplate = true
+        return image
+    }
 
-        menu.addItem(NSMenuItem.separator())
-
-        // Display mode submenu
+    private func buildPowerMenu() {
+        let menu = makeMenu()
         let displayMenu = NSMenu()
         displayMenu.autoenablesItems = false
         for mode in DisplayMode.allCases {
-            let item = NSMenuItem(
-                title: mode.label,
-                action: #selector(displayModeSelected(_:)),
-                keyEquivalent: ""
-            )
+            let item = NSMenuItem(title: mode.label, action: #selector(displayModeSelected(_:)), keyEquivalent: "")
             item.target = self
             item.isEnabled = mode != .battery || AppDelegate.hasBattery
             item.representedObject = mode
             item.state = mode == displayMode ? .on : .off
             displayMenu.addItem(item)
         }
-        let displayItem = NSMenuItem(title: "Display", action: nil, keyEquivalent: "")
+        let displayItem = NSMenuItem(title: "Power Reading", action: nil, keyEquivalent: "")
+        displayItem.image = menuSymbol("bolt.circle")
         displayItem.submenu = displayMenu
         displayItem.tag = 200
+        displayItem.isHidden = !AppDelegate.hasBattery
         menu.addItem(displayItem)
 
-        // Refresh rate submenu
         let refreshMenu = NSMenu()
         for interval in RefreshInterval.allCases {
-            let item = NSMenuItem(
-                title: interval.label,
-                action: #selector(refreshIntervalSelected(_:)),
-                keyEquivalent: ""
-            )
+            let item = NSMenuItem(title: interval.label, action: #selector(refreshIntervalSelected(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = interval
             item.state = interval == refreshInterval ? .on : .off
             refreshMenu.addItem(item)
         }
         let refreshItem = NSMenuItem(title: "Refresh Rate", action: nil, keyEquivalent: "")
+        refreshItem.image = menuSymbol("clock")
         refreshItem.submenu = refreshMenu
         refreshItem.tag = 300
         menu.addItem(refreshItem)
-
-        menu.addItem(NSMenuItem.separator())
-
         addMenuBarToggles(to: menu)
-
-        menu.addItem(NSMenuItem.separator())
-
-        let updatesItem = NSMenuItem(
-            title: "Check for Updates...",
-            action: #selector(checkForUpdates),
-            keyEquivalent: ""
-        )
-        updatesItem.target = self
-        menu.addItem(updatesItem)
-
-        // Preferences
-        let prefsItem = NSMenuItem(
-            title: "Preferences...",
-            action: #selector(showPreferences),
-            keyEquivalent: ","
-        )
-        prefsItem.target = self
-        menu.addItem(prefsItem)
-
-        menu.addItem(NSMenuItem.separator())
-
-        // Quit
-        let quitItem = NSMenuItem(
-            title: "Quit WattBar",
-            action: #selector(quitApp),
-            keyEquivalent: "q"
-        )
-        quitItem.target = self
-        menu.addItem(quitItem)
-
+        addCommonMenuActions(to: menu)
         powerStatusItem?.menu = menu
     }
 
-    // MARK: Battery Menu
-
     private func buildBatteryMenu() {
-        let menu = NSMenu()
-
-        // Battery info
-        let batteryItem = NSMenuItem(title: "Battery: --%", action: nil, keyEquivalent: "")
-        batteryItem.tag = 100
-        menu.addItem(batteryItem)
-
-        let chargingItem = NSMenuItem(title: "Status: --", action: nil, keyEquivalent: "")
-        chargingItem.tag = 101
-        menu.addItem(chargingItem)
-
-        menu.addItem(NSMenuItem.separator())
-
-        // Icon style submenu
+        let menu = makeMenu()
         let iconStyleMenu = NSMenu()
         for style in BatteryIconStyle.allCases {
-            let item = NSMenuItem(
-                title: style.label,
-                action: #selector(batteryIconStyleSelected(_:)),
-                keyEquivalent: ""
-            )
+            let item = NSMenuItem(title: style.label, action: #selector(batteryIconStyleSelected(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = style
             item.state = style == batteryIconStyle ? .on : .off
             iconStyleMenu.addItem(item)
         }
-        let iconStyleItem = NSMenuItem(title: "Icon Style", action: nil, keyEquivalent: "")
+        let iconStyleItem = NSMenuItem(title: "Battery Icon Style", action: nil, keyEquivalent: "")
+        iconStyleItem.image = menuSymbol("battery.100percent")
         iconStyleItem.submenu = iconStyleMenu
         iconStyleItem.tag = 500
         menu.addItem(iconStyleItem)
-
-        menu.addItem(NSMenuItem.separator())
-
         addMenuBarToggles(to: menu)
-
-        menu.addItem(NSMenuItem.separator())
-
-        let updatesItem = NSMenuItem(
-            title: "Check for Updates...",
-            action: #selector(checkForUpdates),
-            keyEquivalent: ""
-        )
-        updatesItem.target = self
-        menu.addItem(updatesItem)
-
-        // Preferences
-        let prefsItem = NSMenuItem(
-            title: "Preferences...",
-            action: #selector(showPreferences),
-            keyEquivalent: ","
-        )
-        prefsItem.target = self
-        menu.addItem(prefsItem)
-
-        menu.addItem(NSMenuItem.separator())
-
-        // Quit
-        let quitItem = NSMenuItem(
-            title: "Quit WattBar",
-            action: #selector(quitApp),
-            keyEquivalent: "q"
-        )
-        quitItem.target = self
-        menu.addItem(quitItem)
-
+        addCommonMenuActions(to: menu)
         batteryStatusItem?.menu = menu
+    }
+
+    private func addCommonMenuActions(to menu: NSMenu) {
+        menu.addItem(.separator())
+        for (title, symbol, action, key) in [
+            ("Preferences…", "slider.horizontal.3", #selector(showPreferences), ","),
+            ("Check for Updates…", "arrow.triangle.2.circlepath", #selector(checkForUpdates), ""),
+            ("Quit WattBar", "power", #selector(quitApp), "q")
+        ] {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+            item.image = menuSymbol(symbol)
+            item.target = self
+            menu.addItem(item)
+        }
+    }
+
+    // Keep the standard macOS menu for keyboard navigation and native submenus.
+    // The dashboard is created on demand and released as soon as its menu closes.
+    func menuWillOpen(_ menu: NSMenu) {
+        guard let item = menu.item(withTag: 100) else { return }
+        let batteryFocused = menu === batteryStatusItem?.menu
+        let view = NSHostingView(rootView: MenuDashboardView(
+            model: dashboardModel,
+            mode: batteryFocused ? .battery : displayMode,
+            hasBattery: AppDelegate.hasBattery,
+            batteryFocused: batteryFocused
+        ))
+        view.frame = NSRect(origin: .zero, size: view.fittingSize)
+        item.view = view
+        refreshReading()
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        menu.item(withTag: 100)?.view = nil
     }
 
     // MARK: Menu Bar Toggles
 
     private func addMenuBarToggles(to menu: NSMenu) {
+        let submenu = NSMenu()
         let toggles: [(String, Selector, Int)] = [
-            ("Show Power Usage", #selector(togglePowerDisplay), 400),
-            ("Show Battery Icon", #selector(toggleBatteryIcon), 401),
-            ("Show Battery Percentage", #selector(toggleBatteryPercent), 402)
+            ("Power Usage", #selector(togglePowerDisplay), 400),
+            ("Battery Icon", #selector(toggleBatteryIcon), 401),
+            ("Battery Percentage", #selector(toggleBatteryPercent), 402)
         ]
         for (title, action, tag) in toggles {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
             item.target = self
             item.tag = tag
             item.isHidden = tag != 400 && !AppDelegate.hasBattery
-            menu.addItem(item)
+            submenu.addItem(item)
         }
+        let item = NSMenuItem(title: "Menu Bar Items", action: nil, keyEquivalent: "")
+        item.image = menuSymbol("menubar.rectangle")
+        item.tag = 410
+        item.submenu = submenu
+        menu.addItem(item)
         updateMenuBarToggleCheckmarks(in: menu)
     }
 
     private func updateMenuBarToggleCheckmarks(in menu: NSMenu) {
-        menu.item(withTag: 400)?.state = showPowerInMenuBar ? .on : .off
-        menu.item(withTag: 401)?.state = showBatteryIcon ? .on : .off
-        menu.item(withTag: 402)?.state = showBatteryPercent ? .on : .off
+        guard let submenu = menu.item(withTag: 410)?.submenu else { return }
+        submenu.item(withTag: 400)?.state = showPowerInMenuBar ? .on : .off
+        submenu.item(withTag: 401)?.state = showBatteryIcon ? .on : .off
+        submenu.item(withTag: 402)?.state = showBatteryPercent ? .on : .off
     }
 
     // MARK: Timer
@@ -452,9 +416,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             self?.refreshReading()
         }
-        // Use .default mode instead of .common to allow better power management
-        // The timer doesn't need to fire during modal dialogs or scrolling
-        RunLoop.main.add(timer, forMode: .default)
+        // Reuse this timer while menus track so the dashboard stays live.
+        // Tolerance and the single-read guard still bound sensor work.
+        RunLoop.main.add(timer, forMode: .common)
         // Set tolerance to 50% of interval to allow aggressive timer coalescing
         // This lets macOS batch timer fires and keep CPU in low-power states longer
         timer.tolerance = interval * 0.5
@@ -480,6 +444,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self.readInFlight = false
                 guard !self.isSleeping, !self.isTerminating else { return }
                 self.currentReading = reading
+                self.dashboardModel.record(reading, at: Date())
                 self.updateDisplay()
             }
         }
@@ -522,29 +487,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 powerStatusItem?.button?.title = newTitle
                 powerStatusItem?.button?.needsDisplay = true
             }
-
-            // Update power menu reading item
-            if let menu = powerStatusItem?.menu,
-               let readingItem = menu.item(withTag: 100) {
-                readingItem.title = "System: \(PowerReading.watts(currentReading.systemTotal))" +
-                    (AppDelegate.hasBattery ? " | Battery: \(PowerReading.watts(currentReading.batteryRate))" : "")
-            }
         }
 
         // Update battery status item
         if showBatteryInMenuBar {
             let percent = currentReading.batteryPercent
             updateBatteryStatusItem(percent: percent, isCharging: currentReading.isCharging)
-
-            // Update battery menu items
-            if let menu = batteryStatusItem?.menu {
-                if let batteryItem = menu.item(withTag: 100) {
-                    batteryItem.title = "Battery: \(percent.map { "\($0)%" } ?? "Unavailable")"
-                }
-                if let chargingItem = menu.item(withTag: 101) {
-                    chargingItem.title = "Status: \(currentReading.batteryStatus)"
-                }
-            }
         }
     }
 
