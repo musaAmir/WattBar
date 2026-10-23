@@ -43,13 +43,16 @@ intervalButtons.forEach(button => button.addEventListener('click', () => {
 
 // Energy & Apps window illustration (sample data, matches the menu sample above).
 const periods = {
-  minute: { label: 'Past Minute', wh: 0.2983, avg: 17.9, peak: 24.6, recorded: '1m' },
-  hour: { label: 'Past Hour', wh: 15.2, avg: 15.2, peak: 31.2, recorded: '1h 0m' },
-  day: { label: 'Past Day', wh: 94.4, avg: 11.8, peak: 38.5, recorded: '8h 0m' },
-  week: { label: 'Past Week', wh: 593.6, avg: 10.6, peak: 41.0, recorded: '2d 8h' },
-  month: { label: 'Past Month', wh: 2140, avg: 10.9, peak: 44.7, recorded: '8d 4h' },
-  threeMonths: { label: 'Past 3 Months', wh: 5330, avg: 11.1, peak: 44.7, recorded: '20d 0h' }
+  minute: { label: 'Past Minute', wh: 0.2983, avg: 17.9, peak: 24.6, recorded: '1m', coverage: 1, axis: ['40:15', '40:30', '40:45', '41:00'] },
+  hour: { label: 'Past Hour', wh: 15.2, avg: 15.2, peak: 31.2, recorded: '1h 0m', coverage: 1, axis: ['8:45', '9:00', '9:15', '9:30'] },
+  day: { label: 'Past Day', wh: 94.4, avg: 11.8, peak: 38.5, recorded: '8h 0m', coverage: 8 / 24, axis: ['12:00', '18:00', '00:00', '06:00'] },
+  week: { label: 'Past Week', wh: 593.6, avg: 10.6, peak: 41.0, recorded: '2d 8h', coverage: 56 / 168, axis: ['18 Oct', '20 Oct', '22 Oct', '23 Oct'] },
+  month: { label: 'Past Month', wh: 2140, avg: 10.9, peak: 44.7, recorded: '8d 4h', coverage: 196 / 720, axis: ['28 Sep', '5 Oct', '12 Oct', '19 Oct'] },
+  threeMonths: { label: 'Past 3 Months', wh: 5330, avg: 11.1, peak: 44.7, recorded: '20d 0h', coverage: 480 / 2160, axis: ['1 Aug', '22 Aug', '12 Sep', '3 Oct'] }
 };
+const chartDescriptions = { minute: 'The last 60 seconds', hour: 'The last 60 minutes', day: 'The last 24 hours',
+  week: 'The last 7 days', month: 'The last 30 days', threeMonths: 'The last 90 days' };
+const coverageText = value => value > 0 && value < 0.01 ? '<1%' : `${Math.min(100, Math.floor(value * 100))}%`;
 // CPU energy per app during the sample hour; other periods scale with total energy.
 const apps = [['Xcode', 'X', 142, 3.84], ['Safari', 'S', 61, 2.10], ['Music', 'M', 12, 0.62], ['Mail', 'M', 6, 0.31],
   ['Photos', 'P', 5, 0.24], ['Notes', 'N', 2, 0.09]];
@@ -72,7 +75,11 @@ function renderWindow() {
   setText('#ew-avg', `${p.avg.toFixed(1)} W`);
   setText('#ew-avg-caption', p.label);
   setText('#ew-peak', `${p.peak.toFixed(1)} W`);
-  setText('#ew-coverage', `${p.recorded} recorded`);
+  document.querySelectorAll('.ew-chart-desc').forEach(el => { el.textContent = chartDescriptions[period]; });
+  document.querySelectorAll('.ew-recorded').forEach(el => { el.textContent = `${p.recorded} recorded`; });
+  document.querySelectorAll('.ew-cov-text').forEach(el => { el.textContent = `${coverageText(p.coverage)} of this period`; });
+  document.querySelectorAll('.ew-cov').forEach(el => el.style.setProperty('--cov', `${p.coverage * 100}%`));
+  document.querySelectorAll('.ew-x').forEach(el => el.replaceChildren(...p.axis.map(label => cell('span', label))));
   setText('#ew-top-caption', `CPU energy · ${p.label.toLowerCase()}`);
   setText('#ew-observed', `${p.recorded} observed`);
   const top = appRows(3);
