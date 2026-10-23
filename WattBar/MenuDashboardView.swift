@@ -54,11 +54,8 @@ struct MenuDashboardView: View {
 
     private var header: some View {
         HStack(spacing: 9) {
-            Image(systemName: "bolt.fill")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(accent)
-                .frame(width: 32, height: 32)
-                .background(accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
+            Image(nsImage: WattBarBrand.appIcon)
+                .resizable().interpolation(.high).frame(width: 32, height: 32)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text("WattBar").font(.system(size: 13, weight: .semibold))

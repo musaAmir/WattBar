@@ -40,6 +40,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     private var energyWindow: NSWindow?
     private var preferencesWindow: NSWindow?
     private var preferencesController: PreferencesController?
+    private var preferencesToolbar: PreferencesToolbarController?
 
     // Sparkle checks the appcast in Info.plist (SUFeedURL) once a day and offers to install new versions
     private let updaterController = SPUStandardUpdaterController(
@@ -921,6 +922,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
             controller.currentPower = currentReading.systemTotal
             controller.currentBatteryPercent = currentReading.batteryPercent
 
+            controller.menuBarPreview = { [weak self] in
+                (self?.powerStatusItem?.button?.title ?? "— W",
+                 self?.batteryStatusItem?.button?.image,
+                 self?.batteryStatusItem?.button?.title ?? "—%")
+            }
+            controller.onOpenDashboard = { [weak self] in self?.showEnergyHistory() }
+            controller.onCheckForUpdates = { [weak self] in self?.checkForUpdates() }
             controller.onUpdate = { [weak self] in
                 guard let self = self, let ctrl = self.preferencesController else { return }
                 // Only assign the toggle that changed, so the "keep one item visible" rule applies to it
@@ -950,7 +958,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
             window.styleMask = [.titled, .closable]
             window.isReleasedWhenClosed = false
             window.delegate = self
-            window.setContentSize(NSSize(width: 380, height: 480))
+            let toolbarController = PreferencesToolbarController(controller: controller)
+            preferencesToolbar = toolbarController
+            window.toolbar = toolbarController.toolbar
+            window.toolbarStyle = .preference
+            window.setContentSize(NSSize(width: 590, height: 440))
             window.center()
 
             preferencesWindow = window
@@ -990,6 +1002,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         guard notification.object as? NSWindow === preferencesWindow else { return }
         preferencesWindow = nil
         preferencesController = nil
+        preferencesToolbar = nil
     }
 
     @objc private func checkForUpdates() {
