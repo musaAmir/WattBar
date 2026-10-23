@@ -965,14 +965,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
 
     @objc private func showEnergyHistory() {
         if energyWindow == nil {
-            let view = EnergyDetailView(model: dashboardModel, hasBattery: AppDelegate.hasBattery)
+            let view = EnergyDetailView(model: dashboardModel, hasBattery: AppDelegate.hasBattery,
+                                        onOpenPreferences: { [weak self] in self?.showPreferences() })
             let window = NSWindow(contentViewController: NSHostingController(rootView: view))
             window.title = "WattBar — Energy & Apps"
             window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
             window.isReleasedWhenClosed = false
             window.delegate = self
-            window.setContentSize(NSSize(width: 660, height: 700))
-            window.contentMinSize = NSSize(width: 620, height: 560)
+            window.setContentSize(NSSize(width: 1060, height: 790))
+            window.contentMinSize = NSSize(width: 920, height: 640)
             window.center()
             energyWindow = window
         }

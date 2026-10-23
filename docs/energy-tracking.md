@@ -2,6 +2,8 @@
 
 Open **Energy & Apps…** from either WattBar menu, or reopen WattBar, to explore the past minute, hour, or rolling 24 hours. The compact menu also shows all three periods.
 
+**Overview** combines energy, power history and your top applications. **Applications** lets you search, sort, include background processes and select an app for its detailed CPU measurements. **History** compares all three rolling periods. Use Command-1, Command-2 and Command-3 to switch pages, and open Preferences from the sidebar. Hover or select a point on the chart to inspect recorded power at a specific time.
+
 - **Average draw (W)** is the time-weighted average over recorded time.
 - **Energy recorded (Wh / mWh / kWh)** is power integrated over that time. For example, 30 W recorded for one hour is 30 Wh.
 - **Recorded coverage** tells you how much of the selected period was measured. Missing data, sleep, time while WattBar was closed, and time before the first pair of readings contribute neither energy nor coverage. A partially recorded day is not projected into a full day.
