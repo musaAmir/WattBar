@@ -179,7 +179,69 @@ final class EnergyHistoryTests: XCTestCase {
         XCTAssertEqual(day.coverage, 1)
         XCTAssertEqual(try XCTUnwrap(day.wattHours), 240, accuracy: 0.000_001)
         record(nil, at: 259_214, in: &history)
+        XCTAssertNil(summary(history, at: 259_214, window: .day).averageWatts)
+        XCTAssertEqual(summary(history, at: 259_214, window: .week).coveredSeconds, 172_800)
+        record(nil, at: 94 * 86_400, in: &history)
         XCTAssertEqual(history.bucketCount, 0)
+    }
+
+    func testWeekMonthAndThreeMonthsRetainIndependentRollingTotals() throws {
+        var history = EnergyHistory()
+        for day in 0..<91 {
+            let offset = Double(day) * 86_400
+            record(36, at: offset, in: &history)
+            record(36, at: offset + 10, in: &history)
+        }
+        let now = 90 * 86_400.0 + 10
+        // The sample at the exact lower boundary is excluded; there is no backfill.
+        for (window, days) in [(EnergyWindow.week, 7.0), (.month, 30.0), (.threeMonths, 90.0)] {
+            let result = summary(history, at: now, window: window)
+            XCTAssertEqual(result.coveredSeconds, days * 10)
+            XCTAssertEqual(try XCTUnwrap(result.wattHours), days * 0.1, accuracy: 0.000001)
+            XCTAssertEqual(result.averageWatts, 36)
+        }
+        let restored = try JSONDecoder().decode(EnergyHistory.self, from: JSONEncoder().encode(history))
+        XCTAssertEqual(summary(restored, at: now, window: .threeMonths).coveredSeconds, 900)
+        XCTAssertLessThan(history.bucketCount, 200)
+    }
+
+    func testHourlyCompactionKeepsMissingIntervalsAndBothSensors() throws {
+        var history = EnergyHistory()
+        record(10, at: 0, in: &history, battery: 2)
+        record(10, at: 5, in: &history, battery: 2)
+        record(nil, at: 10, in: &history)
+        record(20, at: 30, in: &history, battery: 4)
+        record(20, at: 35, in: &history, battery: 4)
+        record(nil, at: 2 * 86_400, in: &history)
+        let restored = try JSONDecoder().decode(EnergyHistory.self, from: JSONEncoder().encode(history))
+        let result = summary(restored, at: 2 * 86_400, window: .week)
+        XCTAssertEqual(result.coveredSeconds, 10)
+        XCTAssertEqual(result.averageWatts, 15)
+        XCTAssertEqual(summary(restored, at: 2 * 86_400, window: .week, mode: .battery).averageWatts, 3)
+        let chart = restored.chart(for: .minute, mode: .systemTotal, at: start.addingTimeInterval(60), pointCount: 60)
+        XCTAssertNil(chart[15].averageWatts)
+        XCTAssertEqual(chart[30].averageWatts, 20)
+    }
+
+    func testFrequentSensorGapsSurviveHourlyCompaction() throws {
+        var history = EnergyHistory()
+        for offset in stride(from: 0.0, to: 3_600, by: 3) {
+            record(10, at: offset, in: &history)
+            record(10, at: offset + 1, in: &history)
+            record(nil, at: offset + 2, in: &history)
+        }
+        record(nil, at: 2 * 86_400, in: &history)
+        let restored = try JSONDecoder().decode(EnergyHistory.self, from: JSONEncoder().encode(history))
+        XCTAssertEqual(summary(restored, at: 2 * 86_400, window: .week).coveredSeconds, 1_200)
+        XCTAssertEqual(summary(restored, at: 2 * 86_400, window: .week).averageWatts, 10)
+    }
+
+    func testLegacyDayArchiveMigratesWithoutLosingEnergy() throws {
+        let source = #"{"version":1,"bucketSeconds":10,"buckets":[{"start":1000,"system":[{"start":1000,"end":1010,"wattSeconds":100,"peakWatts":10}],"battery":[]}]}"#
+        var history = try JSONDecoder().decode(EnergyHistory.self, from: Data(source.utf8))
+        history.prepareAfterLoading(at: start.addingTimeInterval(2 * 86_400))
+        XCTAssertEqual(summary(history, at: 2 * 86_400, window: .month).coveredSeconds, 10)
+        XCTAssertEqual(summary(history, at: 2 * 86_400, window: .month).averageWatts, 10)
     }
 
     func testDecodingNeverRestoresIntegrationAnchor() throws {

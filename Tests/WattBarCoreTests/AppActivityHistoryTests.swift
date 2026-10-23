@@ -73,6 +73,53 @@ final class AppActivityHistoryTests: XCTestCase {
         XCTAssertTrue(restored.summary(for: .day, at: start.addingTimeInterval(90_000)).apps.isEmpty)
     }
 
+    func testLongWindowsCompactionAndRestartPreservePerAppEnergy() throws {
+        var history = AppActivityHistory()
+        for day in 0..<91 { history.record(sample(Double(day) * 86_400)) }
+        let now = start.addingTimeInterval(90 * 86_400 + 5)
+        history.prepareAfterLoading(at: now)
+        let data = try JSONEncoder().encode(history)
+        var restored = try JSONDecoder().decode(AppActivityHistory.self, from: data)
+        for (window, days) in [(EnergyWindow.week, 7.0), (.month, 30.0), (.threeMonths, 90.0)] {
+            let result = restored.summary(for: window, at: now)
+            XCTAssertEqual(result.observedDuration, days * 5)
+            let app = try XCTUnwrap(result.apps.first)
+            XCTAssertEqual(app.cpuSeconds, days * 2)
+            XCTAssertEqual(try XCTUnwrap(app.cpuEnergyWh), days * 0.005, accuracy: 0.000001)
+        }
+        XCTAssertLessThan(data.count, 25_000)
+        restored.prepareAfterLoading(at: now.addingTimeInterval(91 * 86_400))
+        XCTAssertTrue(restored.summary(for: .threeMonths, at: now.addingTimeInterval(91 * 86_400)).apps.isEmpty)
+    }
+
+    func testHourlyCompactionPreservesGapsAndUnknownEnergy() throws {
+        var history = AppActivityHistory()
+        history.record(sample(0))
+        history.record(sample(20, joules: nil))
+        history.record(sample(2 * 86_400))
+        let data = try JSONEncoder().encode(history)
+        let restored = try JSONDecoder().decode(AppActivityHistory.self, from: data)
+        let result = restored.summary(for: .week, at: start.addingTimeInterval(2 * 86_400 + 5))
+        XCTAssertEqual(result.observedDuration, 15)
+        XCTAssertEqual(result.apps.first?.cpuSeconds, 6)
+        XCTAssertNil(result.apps.first?.cpuEnergyWh)
+        XCTAssertEqual(restored.summary(for: .minute, at: start.addingTimeInterval(85)).observedDuration, 0)
+    }
+
+    func testPreviousIdentityTableArchiveMigratesIntoHourlyHistory() throws {
+        var history = AppActivityHistory()
+        history.record(sample(0))
+        history.record(sample(200))
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(history)) as? [String: Any])
+        json["version"] = 2
+        json.removeValue(forKey: "hourlyBuckets")
+        var restored = try JSONDecoder().decode(AppActivityHistory.self, from: JSONSerialization.data(withJSONObject: json))
+        restored.prepareAfterLoading(at: start.addingTimeInterval(2 * 86_400))
+        let result = restored.summary(for: .month, at: start.addingTimeInterval(2 * 86_400))
+        XCTAssertEqual(result.observedDuration, 10)
+        XCTAssertEqual(try XCTUnwrap(result.apps.first?.cpuEnergyWh), 0.01, accuracy: 0.000001)
+    }
+
     func testStoreRestartAndCorruption() throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: folder) }

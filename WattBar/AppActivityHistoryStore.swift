@@ -22,7 +22,7 @@ final class AppActivityHistoryStore {
             errorLock.unlock()
         }
     }
-    private static let maximumFileBytes = 32 * 1_024 * 1_024
+    private static let maximumFileBytes = 64 * 1_024 * 1_024
 
     init(url: URL = AppActivityHistoryStore.defaultURL) { self.url = url }
 

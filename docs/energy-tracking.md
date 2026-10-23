@@ -1,15 +1,15 @@
 # Energy history
 
-Open **Energy & Apps…** from either WattBar menu, or reopen WattBar, to explore the past minute, hour, or rolling 24 hours. The compact menu also shows all three periods.
+Open **Energy & Apps…** from either WattBar menu, or reopen WattBar, to explore the past minute, hour, day, week, month, or three months. The longer periods are rolling 7, 30, and 90 days, rather than calendar periods. The compact menu also shows all six periods.
 
-**Overview** combines energy, power history and your top applications. **Applications** lets you search, sort, include background processes and select an app for its detailed CPU measurements. **History** compares all three rolling periods. Use Command-1, Command-2 and Command-3 to switch pages, and open Preferences from the sidebar. Hover or select a point on the chart to inspect recorded power at a specific time.
+**Overview** combines energy, power history and your top applications. **Applications** lets you search, sort, include background processes and select an app for its detailed CPU measurements. **History** compares all six rolling periods. Use Command-1, Command-2 and Command-3 to switch pages, and open Preferences from the sidebar. Hover or select a point on the chart to inspect recorded power at a specific time.
 
 - **Average draw (W)** is the time-weighted average over recorded time.
 - **Energy recorded (Wh / mWh / kWh)** is power integrated over that time. For example, 30 W recorded for one hour is 30 Wh.
 - **Recorded coverage** tells you how much of the selected period was measured. Missing data, sleep, time while WattBar was closed, and time before the first pair of readings contribute neither energy nor coverage. A partially recorded day is not projected into a full day.
 - The system and battery sensors are tracked separately. Battery transfer includes both charging and discharging; it is not equivalent to whole-Mac electricity consumption. These are Mac sensor estimates rather than outlet measurements; external peripherals and charger losses may not be included.
 
-Readings are integrated using trapezoids between consecutive valid samples. Long acquisition gaps and sleep interrupt the integration anchor. Whole-Mac history is compacted into ten-second buckets with exact coverage spans. A partially selected bucket uses the span's average, so a boundary's energy/peak may be approximate by up to ten seconds. The chart leaves gaps when no measurement exists.
+Readings are integrated using trapezoids between consecutive valid samples. Long acquisition gaps and sleep interrupt the integration anchor. Whole-Mac history retains ten-second buckets for the latest day, then compacts into hourly buckets with exact coverage spans. A partially selected span uses its average, so a boundary's energy/peak may be approximate by up to ten seconds in recent history or one hour in older history. The chart leaves gaps when no measurement exists.
 
 ## Apps and processes
 
@@ -17,11 +17,11 @@ On supported Macs, WattBar reads the public `proc_pid_rusage` CPU-energy counter
 
 WattBar samples accessible processes about every five seconds, or at the configured sensor refresh rate when it is slower. Nested helpers are grouped under their outer application. Processes without an application bundle are named by executable. Only processes visible in two consecutive snapshots contribute deltas: very short-lived, exited-between-samples or inaccessible processes may be missed. PID reuse and counter resets never import lifetime consumption. CPU percentages average over the observed interval and can exceed 100% for multiple cores.
 
-Per-app history retains the latest two minutes as individual intervals, then compacts to minute buckets. Older boundary attribution is proportional to observed time in that minute. Up to 100 identities are retained per bucket; additional resources are included under **Other processes**. Closed apps remain in the selected historical window. A dash indicates incomplete or unsupported CPU-energy measurement.
+Per-app history retains the latest two minutes as individual intervals, then compacts to minute buckets for the latest day and hourly buckets for older history. Boundary attribution is proportional to observed time in the bucket. Up to 100 identities are retained per bucket; additional resources are included under **Other processes**. Closed apps remain in the selected historical window. A dash indicates incomplete or unsupported CPU-energy measurement.
 
 ## Storage
 
-History is stored locally in `~/Library/Application Support/WattBar/energy-history.json` and `app-activity.json`. Only the last 24 hours are retained. Checkpoints are atomic and normally written once per minute, with a final save on sleep or normal quit. A crash can lose the latest unsaved minute. Neither file is uploaded. Corrupt or unwritable history surfaces a notice in the interface; new readings continue in memory. Integration baselines are rebuilt on every launch.
+History is stored locally in `~/Library/Application Support/WattBar/energy-history.json` and `app-activity.json`. The last 90 days are retained. Existing history migrates automatically; previously expired history cannot be recovered, so longer windows fill as WattBar runs. Checkpoints are atomic and normally written once per minute, with a final save on sleep or normal quit. A crash can lose the latest unsaved minute. Neither file is uploaded. Corrupt or unwritable history surfaces a notice in the interface; new readings continue in memory. Integration baselines are rebuilt on every launch.
 
 ## Apple references
 

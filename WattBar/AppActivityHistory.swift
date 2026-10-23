@@ -17,7 +17,8 @@ struct AppActivitySummary {
     let supportsEnergy: Bool
 }
 
-/// Keeps recent intervals for minute precision, then compacts into minute buckets.
+/// Keeps recent intervals for minute precision, then minute buckets for a day
+/// and hourly buckets for the remainder of the ninety-day retention window.
 /// At a clipped older bucket, resource totals are proportional to its observed
 /// time. Coverage remains exact; resource attribution at that boundary is approximate.
 struct AppActivityHistory: Codable {
@@ -37,9 +38,11 @@ struct AppActivityHistory: Codable {
         var duration: Double { spans.reduce(0) { $0 + $1.end.timeIntervalSince($1.start) } }
     }
     private var buckets: [Bucket] = []
+    private var hourlyBuckets: [Bucket] = []
     private var recent: [AppActivitySample] = []
     private var latestEnd: Date?
-    private static let retention: Double = 86_400
+    static let retention: Double = 90 * 86_400
+    private static let detailedRetention: Double = 86_400
     private static let maximumApps = 100
     private static let otherID = "wattbar.other-processes"
 
@@ -51,6 +54,7 @@ struct AppActivityHistory: Codable {
             // Do not overlap old observations after a wall-clock correction.
             recent.removeAll { $0.end > sample.start }
             buckets.removeAll { $0.start.addingTimeInterval(60) > sample.start }
+            hourlyBuckets.removeAll { $0.start.addingTimeInterval(3_600) > sample.start }
             self.latestEnd = nil
         }
         if let latestEnd, sample.start < latestEnd { return }
@@ -70,7 +74,8 @@ struct AppActivityHistory: Codable {
         var observed = 0.0
         var energyAvailable = false
         var allEnergyAvailable = true
-        for bucket in buckets {
+        for bucket in hourlyBuckets + buckets {
+            guard bucket.start < date, (bucket.spans.last?.end ?? .distantPast) > start else { continue }
             let covered = bucket.spans.reduce(0.0) { $0 + Self.overlap($1.start, $1.end, start, date) }
             guard covered > 0, bucket.duration > 0 else { continue }
             observed += covered
@@ -107,10 +112,28 @@ struct AppActivityHistory: Codable {
 
     mutating func prepareAfterLoading(at date: Date) {
         let cutoff = date.addingTimeInterval(-Self.retention)
-        buckets.removeAll { $0.start.addingTimeInterval(60) <= cutoff || $0.spans.contains(where: { $0.end > date }) }
+        buckets.removeAll { $0.spans.contains(where: { $0.end > date }) }
+        hourlyBuckets.removeAll { $0.start.addingTimeInterval(3_600) <= cutoff || $0.spans.contains(where: { $0.end > date }) }
         recent.removeAll { $0.end <= cutoff || $0.end > date }
-        latestEnd = max(buckets.last?.spans.last?.end ?? .distantPast, recent.last?.end ?? .distantPast)
-        if latestEnd == .distantPast { latestEnd = nil }
+        let count = buckets.prefix { $0.start.addingTimeInterval(60) <= date.addingTimeInterval(-Self.detailedRetention) }.count
+        for bucket in buckets.prefix(count) { compactOlder(bucket) }
+        if count > 0 { buckets.removeFirst(count) }
+        hourlyBuckets.removeAll { $0.start.addingTimeInterval(3_600) <= cutoff }
+        latestEnd = [hourlyBuckets.last?.spans.last?.end, buckets.last?.spans.last?.end, recent.last?.end].compactMap { $0 }.max()
+    }
+
+    private mutating func compactOlder(_ bucket: Bucket) {
+        let start = Date(timeIntervalSince1970: floor(bucket.start.timeIntervalSince1970 / 3_600) * 3_600)
+        if hourlyBuckets.last?.start != start { hourlyBuckets.append(Bucket(start: start)) }
+        let index = hourlyBuckets.count - 1
+        for span in bucket.spans {
+            if hourlyBuckets[index].spans.last?.end == span.start {
+                hourlyBuckets[index].spans[hourlyBuckets[index].spans.count - 1].end = span.end
+            } else { hourlyBuckets[index].spans.append(span) }
+        }
+        hourlyBuckets[index].supportsEnergy = hourlyBuckets[index].supportsEnergy && bucket.supportsEnergy
+        for value in bucket.apps.values { Self.add(value, scale: 1, to: &hourlyBuckets[index].apps) }
+        Self.boundApps(&hourlyBuckets[index].apps)
     }
 
     private mutating func compact(_ sample: AppActivitySample) {
@@ -182,63 +205,77 @@ struct AppActivityHistory: Codable {
         let apps: [String: ArchivedUsage]
         let supportsEnergy: Bool
     }
-    private enum CodingKeys: String, CodingKey { case version, buckets, recent, identities }
+    private enum CodingKeys: String, CodingKey { case version, buckets, hourlyBuckets, recent, identities }
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         // App names and paths are stored once, rather than in every minute bucket.
         var identities: [String: Identity] = [:]
-        let archived = buckets.map { bucket in
-            for app in bucket.apps.values { identities[app.identifier] = Identity(name: app.name, bundleURL: app.bundleURL) }
-            return ArchivedBucket(start: bucket.start, spans: bucket.spans,
-                apps: bucket.apps.mapValues { ArchivedUsage(cpuSeconds: $0.cpuSeconds, cpuJoules: $0.cpuJoules) },
-                supportsEnergy: bucket.supportsEnergy)
+        func archive(_ source: [Bucket]) -> [ArchivedBucket] {
+            source.map { bucket in
+                for app in bucket.apps.values { identities[app.identifier] = Identity(name: app.name, bundleURL: app.bundleURL) }
+                return ArchivedBucket(start: bucket.start, spans: bucket.spans,
+                    apps: bucket.apps.mapValues { ArchivedUsage(cpuSeconds: $0.cpuSeconds, cpuJoules: $0.cpuJoules) },
+                    supportsEnergy: bucket.supportsEnergy)
+            }
         }
-        try c.encode(2, forKey: .version)
+        let archived = archive(buckets)
+        let hourly = archive(hourlyBuckets)
+        try c.encode(3, forKey: .version)
         try c.encode(identities, forKey: .identities)
         try c.encode(archived, forKey: .buckets)
+        try c.encode(hourly, forKey: .hourlyBuckets)
         try c.encode(recent, forKey: .recent)
     }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let version = try c.decode(Int.self, forKey: .version)
-        guard version == 1 || version == 2 else {
+        guard (1...3).contains(version) else {
             throw DecodingError.dataCorruptedError(forKey: .version, in: c, debugDescription: "Unsupported app history format")
         }
         if version == 1 { buckets = try c.decode([Bucket].self, forKey: .buckets) }
         else {
             let identities = try c.decode([String: Identity].self, forKey: .identities)
-            let archived = try c.decode([ArchivedBucket].self, forKey: .buckets)
-            buckets = try archived.map { bucket in
-                let apps = try bucket.apps.map { key, value -> (String, Totals) in
-                    guard let identity = identities[key] else {
-                        throw DecodingError.dataCorruptedError(forKey: .identities, in: c, debugDescription: "Missing app identity")
+            func restore(_ archived: [ArchivedBucket]) throws -> [Bucket] {
+                try archived.map { bucket in
+                    let apps = try bucket.apps.map { key, value -> (String, Totals) in
+                        guard let identity = identities[key] else {
+                            throw DecodingError.dataCorruptedError(forKey: .identities, in: c, debugDescription: "Missing app identity")
+                        }
+                        return (key, Totals(identifier: key, name: identity.name, bundleURL: identity.bundleURL,
+                                             cpuSeconds: value.cpuSeconds, cpuJoules: value.cpuJoules))
                     }
-                    return (key, Totals(identifier: key, name: identity.name, bundleURL: identity.bundleURL,
-                                         cpuSeconds: value.cpuSeconds, cpuJoules: value.cpuJoules))
+                    return Bucket(start: bucket.start, spans: bucket.spans,
+                                  apps: Dictionary(uniqueKeysWithValues: apps), supportsEnergy: bucket.supportsEnergy)
                 }
-                return Bucket(start: bucket.start, spans: bucket.spans,
-                              apps: Dictionary(uniqueKeysWithValues: apps), supportsEnergy: bucket.supportsEnergy)
             }
+            buckets = try restore(c.decode([ArchivedBucket].self, forKey: .buckets))
+            hourlyBuckets = try restore(c.decodeIfPresent([ArchivedBucket].self, forKey: .hourlyBuckets) ?? [])
         }
         recent = try c.decode([AppActivitySample].self, forKey: .recent)
         var previous = Date.distantPast
-        var valid = buckets.count <= 1_441 && recent.count <= 1_000
-        for bucket in buckets {
-            valid = valid && bucket.start.timeIntervalSince1970.isFinite && bucket.start >= previous
-                && bucket.apps.count <= Self.maximumApps && bucket.spans.count <= 60 && !bucket.spans.isEmpty
-            var end = bucket.start
-            for span in bucket.spans {
-                valid = valid && span.start >= end && span.end > span.start && span.end <= bucket.start.addingTimeInterval(60)
-                end = span.end
+        var valid = buckets.count <= 1_441 && hourlyBuckets.count <= 2_161 && recent.count <= 1_000
+        for (tier, duration, spanLimit) in [(hourlyBuckets, 3_600.0, 1_024), (buckets, 60.0, 60)] {
+            previous = .distantPast
+            for bucket in tier {
+                valid = valid && bucket.start.timeIntervalSince1970.isFinite && bucket.start >= previous
+                    && bucket.apps.count <= Self.maximumApps && bucket.spans.count <= spanLimit && !bucket.spans.isEmpty
+                var end = bucket.start
+                for span in bucket.spans {
+                    valid = valid && span.start >= end && span.end > span.start && span.end <= bucket.start.addingTimeInterval(duration)
+                    end = span.end
+                }
+                for (key, app) in bucket.apps {
+                    valid = valid && key == app.identifier && !key.isEmpty && key.count <= 4_096 && app.name.count <= 2_048
+                        && app.cpuSeconds.isFinite && app.cpuSeconds >= 0 && app.cpuSeconds <= bucket.duration * 32_768
+                        && (app.cpuJoules.map { $0.isFinite && $0 >= 0 && $0 <= bucket.duration * 1_000_000 } ?? true)
+                }
+                previous = bucket.start.addingTimeInterval(duration)
             }
-            for (key, app) in bucket.apps {
-                valid = valid && key == app.identifier && !key.isEmpty && key.count <= 4_096 && app.name.count <= 2_048
-                    && app.cpuSeconds.isFinite && app.cpuSeconds >= 0 && app.cpuSeconds <= bucket.duration * 32_768
-                    && (app.cpuJoules.map { $0.isFinite && $0 >= 0 && $0 <= bucket.duration * 1_000_000 } ?? true)
-            }
-            previous = bucket.start.addingTimeInterval(60)
         }
-        previous = buckets.last?.spans.last?.end ?? .distantPast
+        if let oldEnd = hourlyBuckets.last?.spans.last?.end, let newStart = buckets.first?.spans.first?.start {
+            valid = valid && oldEnd <= newStart
+        }
+        previous = buckets.last?.spans.last?.end ?? hourlyBuckets.last?.spans.last?.end ?? .distantPast
         for sample in recent {
             valid = valid && Self.valid(sample) && sample.start >= previous
             previous = sample.end

@@ -27,10 +27,10 @@ struct EnergyPeriodControl: View {
         HStack(spacing: 3) {
             ForEach(EnergyWindow.allCases) { period in
                 Button { selection = period } label: {
-                    Text(period == .minute ? "1 min" : period == .hour ? "1 hour" : "24 hours")
+                    Text(period.shortLabel)
                         .font(.system(size: 12, weight: selection == period ? .semibold : .medium))
                         .foregroundStyle(selection == period ? Color.primary : .secondary)
-                        .padding(.horizontal, 15).frame(height: 30)
+                        .padding(.horizontal, 10).frame(height: 30)
                         .background {
                             if selection == period {
                                 RoundedRectangle(cornerRadius: 7).fill(palette.surface)
@@ -111,14 +111,14 @@ struct EnergyTrendCard: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(mode == .systemTotal ? "Power over time" : "Battery transfer over time")
                         .font(.system(size: 14, weight: .semibold))
-                    Text(window == .minute ? "The last 60 seconds" : window == .hour ? "The last 60 minutes" : "The last 24 hours")
+                    Text(window.chartDescription)
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                 }
                 Spacer()
                 if let hovered {
                     VStack(alignment: .trailing, spacing: 4) {
                         Text(EnergyFormat.watts(hovered.watts)).font(.system(size: 14, weight: .semibold)).monospacedDigit()
-                        Text(hovered.date, format: window == .minute ? .dateTime.hour().minute().second() : .dateTime.hour().minute())
+                        Text(hovered.date, format: window == .minute ? .dateTime.hour().minute().second() : window.duration > 86_400 ? .dateTime.month(.abbreviated).day().hour().minute() : .dateTime.hour().minute())
                             .font(.system(size: 10)).foregroundStyle(.secondary)
                     }
                 } else {
@@ -184,7 +184,7 @@ struct EnergyTrendCard: View {
             AxisMarks(values: .automatic(desiredCount: 5)) { value in
                 AxisValueLabel(anchor: .top) {
                     if let date = value.as(Date.self) {
-                        Text(date, format: window == .minute ? .dateTime.minute().second() : .dateTime.hour().minute())
+                        Text(date, format: window == .minute ? .dateTime.minute().second() : window.duration > 86_400 ? .dateTime.month(.abbreviated).day() : .dateTime.hour().minute())
                             .font(.system(size: 9)).foregroundStyle(.secondary)
                     }
                 }
@@ -252,4 +252,12 @@ private final class EnergyAppIconCache {
         cache.setObject(image, forKey: url as NSURL)
         return image
     }
+}
+
+/// The packaged icon is read directly so previews and Settings share the current artwork.
+enum WattBarBrand {
+    static let appIcon: NSImage = {
+        if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"), let image = NSImage(contentsOf: url) { return image }
+        return NSApp.applicationIconImage
+    }()
 }

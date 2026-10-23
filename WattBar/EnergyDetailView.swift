@@ -56,8 +56,8 @@ struct EnergyDetailView: View {
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 9) {
-                Image(systemName: "bolt.fill").font(.system(size: 18, weight: .semibold)).foregroundStyle(palette.accent)
-                    .frame(width: 34, height: 34).background(palette.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+                Image(nsImage: WattBarBrand.appIcon).resizable().interpolation(.high)
+                    .frame(width: 36, height: 36).accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("WattBar").font(.system(size: 15, weight: .semibold)).tracking(-0.3)
                     Text("Energy monitor").font(.system(size: 10)).foregroundStyle(.secondary)
@@ -111,10 +111,10 @@ struct EnergyDetailView: View {
         HStack(alignment: .center, spacing: 14) {
             VStack(alignment: .leading, spacing: 5) {
                 Text(page == .overview ? "Energy overview" : page.rawValue)
-                    .font(.system(size: 23, weight: .semibold)).tracking(-0.6)
+                    .font(.system(size: 23, weight: .semibold)).tracking(-0.6).lineLimit(1)
                 Text(page == .applications ? "Understand the work behind your energy use."
                      : page == .history ? "Your recorded usage, over time." : "A clear view of what your Mac is using.")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                    .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer(minLength: 8)
             EnergyPeriodControl(selection: $window, palette: palette)
@@ -237,7 +237,7 @@ struct EnergyDetailView: View {
             Image(systemName: "clock.badge.checkmark").foregroundStyle(palette.accent)
             VStack(alignment: .leading, spacing: 5) {
                 Text("Your history builds while WattBar runs").font(.system(size: 12, weight: .medium))
-                Text("Averages use recorded time. Sleep and missing readings leave gaps. Your last 24 hours are saved automatically on this Mac.")
+                Text("Averages use recorded time. Sleep and missing readings leave gaps. Your last 90 days are saved automatically on this Mac.")
                     .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
         }.padding(18)
@@ -268,7 +268,7 @@ struct EnergyDetailView: View {
             Text("Watts show power at a moment in time. Watt-hours show energy used over recorded time.")
             Text("Whole-Mac readings come from your Mac’s sensors. App insights cover CPU energy where supported; display, GPU and other device power aren’t assigned to apps.")
             Text("Sleep, missing readings and time before tracking are excluded. Recorded coverage shows how much of each period was measured.")
-            Text("Your history stays on this Mac and rolls off after 24 hours.").foregroundStyle(.secondary)
+            Text("Your history stays on this Mac and rolls off after 90 days.").foregroundStyle(.secondary)
         }.font(.system(size: 12)).fixedSize(horizontal: false, vertical: true).padding(22).frame(width: 340)
     }
 }

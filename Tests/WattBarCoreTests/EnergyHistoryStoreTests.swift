@@ -61,7 +61,7 @@ final class EnergyHistoryStoreTests: XCTestCase {
         restored.record(reading, at: start.addingTimeInterval(13))
         XCTAssertEqual(restored.summary(for: .minute, mode: .systemTotal,
                                         at: start.addingTimeInterval(13)).coveredSeconds, 10)
-        let expired = try EnergyHistoryStore(url: url).load(now: start.addingTimeInterval(90_000))
+        let expired = try EnergyHistoryStore(url: url).load(now: start.addingTimeInterval(91 * 86_400))
         XCTAssertEqual(expired.bucketCount, 0)
     }
 
@@ -80,7 +80,7 @@ final class EnergyHistoryStoreTests: XCTestCase {
         let store = EnergyHistoryStore(url: url)
         let invalidJSON = [
             "not json",
-            #"{"version":2,"bucketSeconds":10,"buckets":[]}"#,
+            #"{"version":99,"bucketSeconds":10,"buckets":[]}"#,
             #"{"version":1,"bucketSeconds":20,"buckets":[]}"#,
             #"{"version":1,"bucketSeconds":10,"buckets":[{"start":1000,"system":[{"start":1000,"end":1011,"wattSeconds":1,"peakWatts":1}],"battery":[]}]}"#,
             #"{"version":1,"bucketSeconds":10,"buckets":[{"start":1000,"system":[{"start":1000,"end":1010,"wattSeconds":-1,"peakWatts":1}],"battery":[]}]}"#,

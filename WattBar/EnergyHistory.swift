@@ -2,7 +2,7 @@ import Foundation
 
 /// Rolling windows, measured backwards from the time the menu is displayed.
 enum EnergyWindow: String, CaseIterable, Identifiable {
-    case minute, hour, day
+    case minute, hour, day, week, month, threeMonths
 
     var id: String { rawValue }
     var duration: TimeInterval {
@@ -10,6 +10,9 @@ enum EnergyWindow: String, CaseIterable, Identifiable {
         case .minute: return 60
         case .hour: return 3_600
         case .day: return 86_400
+        case .week: return 7 * 86_400
+        case .month: return 30 * 86_400
+        case .threeMonths: return 90 * 86_400
         }
     }
     var label: String {
@@ -17,8 +20,32 @@ enum EnergyWindow: String, CaseIterable, Identifiable {
         case .minute: return "Past Minute"
         case .hour: return "Past Hour"
         case .day: return "Past Day"
+        case .week: return "Past Week"
+        case .month: return "Past Month"
+        case .threeMonths: return "Past 3 Months"
         }
     }
+    var shortLabel: String {
+        switch self {
+        case .minute: return "1 min"
+        case .hour: return "1 hour"
+        case .day: return "24h"
+        case .week: return "7 days"
+        case .month: return "30 days"
+        case .threeMonths: return "90 days"
+        }
+    }
+    var chartDescription: String {
+        switch self {
+        case .minute: return "The last 60 seconds"
+        case .hour: return "The last 60 minutes"
+        case .day: return "The last 24 hours"
+        case .week: return "The last 7 days"
+        case .month: return "The last 30 days"
+        case .threeMonths: return "The last 90 days"
+        }
+    }
+
 }
 
 struct EnergySummary {
@@ -40,17 +67,21 @@ struct EnergyChartPoint {
 /// Integrates pairs of real readings. Neither an isolated reading nor a missing
 /// sensor contributes measured time. The integration anchor is never persisted.
 ///
-/// Ten-second buckets keep storage bounded. Within each bucket, contiguous
+/// Ten-second buckets retain recent detail; after a day they compact into hourly
+/// buckets for up to ninety days. Within each bucket, contiguous
 /// measured intervals are combined into a span; gaps remain separate. Trapezoid
 /// integration is exact when a complete span is included. At a window/chart
-/// boundary, the span's average is used for its clipped portion (at most ten
-/// seconds), so energy and peak values at that boundary are approximate. Coverage
-/// remains exact and never extends before the first or after the last reading.
+/// boundary, the span's average is used for its clipped portion (up to ten
+/// seconds recently, or an hour in older history), so boundary energy and peaks
+/// are approximate. Coverage remains exact and never extends before the first or after the last reading.
 struct EnergyHistory: Codable {
     static let bucketDuration: TimeInterval = 10
-    static let retention: TimeInterval = 86_400
-    static let maximumBucketCount = 8_641
+    static let retention: TimeInterval = 90 * 86_400
+    static let detailedRetention: TimeInterval = 86_400
+    static let hourlyDuration: TimeInterval = 3_600
+    static let maximumBucketCount = 8_641 + 2_161
     private static let maximumSpansPerSensor = 16
+    private static let maximumHourlySpans = 2_048
     // Far beyond any supported Mac's consumption, and guards corrupt archives.
     private static let maximumWatts = 100_000.0
 
@@ -74,13 +105,14 @@ struct EnergyHistory: Codable {
     }
 
     private var buckets: [Bucket] = []
+    private var hourlyBuckets: [Bucket] = []
     private var anchor: Anchor?
     private var latestObservation: TimeInterval?
 
     init() {}
 
     /// Exposed internally for retention diagnostics and tests, without raw samples.
-    var bucketCount: Int { buckets.count }
+    var bucketCount: Int { buckets.count + hourlyBuckets.count }
 
     mutating func record(_ reading: PowerReading, at date: Date = Date(),
                          maximumGap: TimeInterval = 15) {
@@ -180,14 +212,16 @@ struct EnergyHistory: Codable {
         var wattSeconds = 0.0
         var covered = 0.0
         var peak: Double?
-        for bucket in buckets {
-            guard bucket.start < end, bucket.start + Self.bucketDuration > start else { continue }
-            for span in (mode == .systemTotal ? bucket.system : bucket.battery) {
-                let duration = min(end, span.end) - max(start, span.start)
-                guard duration > 0 else { continue }
-                wattSeconds += span.wattSeconds * (duration / (span.end - span.start))
-                covered += duration
-                peak = max(peak ?? 0, span.peakWatts)
+        for (source, duration) in [(hourlyBuckets, Self.hourlyDuration), (buckets, Self.bucketDuration)] {
+            for bucket in source {
+                guard bucket.start < end, bucket.start + duration > start else { continue }
+                for span in (mode == .systemTotal ? bucket.system : bucket.battery) {
+                    let duration = min(end, span.end) - max(start, span.start)
+                    guard duration > 0 else { continue }
+                    wattSeconds += span.wattSeconds * (duration / (span.end - span.start))
+                    covered += duration
+                    peak = max(peak ?? 0, span.peakWatts)
+                }
             }
         }
         return EnergySummary(averageWatts: covered > 0 ? wattSeconds / covered : nil,
@@ -214,10 +248,26 @@ struct EnergyHistory: Codable {
     }
 
     private mutating func prune(at now: TimeInterval) {
-        buckets.removeAll { $0.start + Self.bucketDuration <= now - Self.retention }
-        if buckets.count > Self.maximumBucketCount {
-            buckets.removeFirst(buckets.count - Self.maximumBucketCount)
+        // Keep recent precision and compact older measurements without bridging gaps.
+        let count = buckets.prefix { $0.start + Self.bucketDuration <= now - Self.detailedRetention }.count
+        for bucket in buckets.prefix(count) {
+            let start = floor(bucket.start / Self.hourlyDuration) * Self.hourlyDuration
+            if hourlyBuckets.last?.start != start { hourlyBuckets.append(Bucket(start: start)) }
+            let index = hourlyBuckets.count - 1
+            for span in bucket.system { Self.merge(span, into: &hourlyBuckets[index].system) }
+            for span in bucket.battery { Self.merge(span, into: &hourlyBuckets[index].battery) }
         }
+        if count > 0 { buckets.removeFirst(count) }
+        let expired = hourlyBuckets.prefix { $0.start + Self.hourlyDuration <= now - Self.retention }.count
+        if expired > 0 { hourlyBuckets.removeFirst(expired) }
+    }
+
+    private static func merge(_ span: Span, into spans: inout [Span]) {
+        if let last = spans.last, last.end == span.start {
+            spans[spans.count - 1].end = span.end
+            spans[spans.count - 1].wattSeconds += span.wattSeconds
+            spans[spans.count - 1].peakWatts = max(last.peakWatts, span.peakWatts)
+        } else if spans.count < maximumHourlySpans { spans.append(span) }
     }
 
     private mutating func removeFutureSpans(after now: TimeInterval) {
@@ -225,7 +275,12 @@ struct EnergyHistory: Codable {
             buckets[index].system.removeAll { $0.end > now }
             buckets[index].battery.removeAll { $0.end > now }
         }
+        for index in hourlyBuckets.indices {
+            hourlyBuckets[index].system.removeAll { $0.end > now }
+            hourlyBuckets[index].battery.removeAll { $0.end > now }
+        }
         buckets.removeAll { $0.system.isEmpty && $0.battery.isEmpty }
+        hourlyBuckets.removeAll { $0.system.isEmpty && $0.battery.isEmpty }
     }
 
     private static func validWatts(_ value: Float?) -> Double? {
@@ -237,58 +292,67 @@ struct EnergyHistory: Codable {
         value.isFinite && value >= -62_135_596_800 && value <= 253_402_300_799
     }
 
-    private enum CodingKeys: String, CodingKey { case version, bucketSeconds, buckets }
+    private enum CodingKeys: String, CodingKey { case version, bucketSeconds, buckets, hourlyBuckets }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(1, forKey: .version)
+        try container.encode(2, forKey: .version)
         try container.encode(Self.bucketDuration, forKey: .bucketSeconds)
         try container.encode(buckets, forKey: .buckets)
+        try container.encode(hourlyBuckets, forKey: .hourlyBuckets)
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        guard try container.decode(Int.self, forKey: .version) == 1,
+        let version = try container.decode(Int.self, forKey: .version)
+        guard (1...2).contains(version),
               try container.decode(TimeInterval.self, forKey: .bucketSeconds) == Self.bucketDuration else {
             throw DecodingError.dataCorruptedError(forKey: .version, in: container,
                                                    debugDescription: "Unsupported energy history format.")
         }
         buckets = try container.decode([Bucket].self, forKey: .buckets)
-        var lastBucketStart: TimeInterval?
-        guard buckets.count <= Self.maximumBucketCount else {
+        hourlyBuckets = try container.decodeIfPresent([Bucket].self, forKey: .hourlyBuckets) ?? []
+        guard buckets.count <= 8_641, hourlyBuckets.count <= 2_161 else {
             throw DecodingError.dataCorruptedError(forKey: .buckets, in: container,
                                                    debugDescription: "Energy history exceeds its retention limit.")
         }
-        for bucket in buckets {
-            guard Self.validTimestamp(bucket.start),
-                  bucket.start == floor(bucket.start / Self.bucketDuration) * Self.bucketDuration,
-                  lastBucketStart.map({ bucket.start > $0 }) ?? true,
-                  !bucket.system.isEmpty || !bucket.battery.isEmpty else {
-                throw DecodingError.dataCorruptedError(forKey: .buckets, in: container,
-                                                       debugDescription: "Invalid energy history bucket.")
-            }
-            for spans in [bucket.system, bucket.battery] {
-                var lastEnd = bucket.start
-                guard spans.count <= Self.maximumSpansPerSensor else {
+        for (tier, bucketLength, spanLimit) in [(hourlyBuckets, Self.hourlyDuration, Self.maximumHourlySpans), (buckets, Self.bucketDuration, Self.maximumSpansPerSensor)] {
+            var lastBucketStart: TimeInterval?
+            for bucket in tier {
+                guard Self.validTimestamp(bucket.start),
+                      bucket.start == floor(bucket.start / bucketLength) * bucketLength,
+                      lastBucketStart.map({ bucket.start > $0 }) ?? true,
+                      !bucket.system.isEmpty || !bucket.battery.isEmpty else {
                     throw DecodingError.dataCorruptedError(forKey: .buckets, in: container,
-                                                           debugDescription: "Too many energy history spans.")
+                                                           debugDescription: "Invalid energy history bucket.")
                 }
-                for span in spans {
-                    let duration = span.end - span.start
-                    guard Self.validTimestamp(span.start), Self.validTimestamp(span.end),
-                          span.start >= lastEnd, duration > 0,
-                          span.end <= bucket.start + Self.bucketDuration,
-                          span.wattSeconds.isFinite, span.wattSeconds >= 0,
-                          span.peakWatts.isFinite, span.peakWatts >= 0,
-                          span.peakWatts <= Self.maximumWatts,
-                          span.wattSeconds <= span.peakWatts * duration + 0.000_001 else {
+                for spans in [bucket.system, bucket.battery] {
+                    var lastEnd = bucket.start
+                    guard spans.count <= spanLimit else {
                         throw DecodingError.dataCorruptedError(forKey: .buckets, in: container,
-                                                               debugDescription: "Invalid energy history measurement.")
+                                                               debugDescription: "Too many energy history spans.")
                     }
-                    lastEnd = span.end
+                    for span in spans {
+                        let duration = span.end - span.start
+                        guard Self.validTimestamp(span.start), Self.validTimestamp(span.end),
+                              span.start >= lastEnd, duration > 0,
+                              span.end <= bucket.start + bucketLength,
+                              span.wattSeconds.isFinite, span.wattSeconds >= 0,
+                              span.peakWatts.isFinite, span.peakWatts >= 0,
+                              span.peakWatts <= Self.maximumWatts,
+                              span.wattSeconds <= span.peakWatts * duration + 0.000_001 else {
+                            throw DecodingError.dataCorruptedError(forKey: .buckets, in: container,
+                                                                   debugDescription: "Invalid energy history measurement.")
+                        }
+                        lastEnd = span.end
+                    }
                 }
+                lastBucketStart = bucket.start
             }
-            lastBucketStart = bucket.start
+        }
+        if let oldEnd = hourlyBuckets.last.flatMap({ ($0.system + $0.battery).map(\.end).max() }),
+           let recentStart = buckets.first.flatMap({ ($0.system + $0.battery).map(\.start).min() }), oldEnd > recentStart {
+            throw DecodingError.dataCorruptedError(forKey: .buckets, in: container, debugDescription: "Overlapping history tiers.")
         }
         // anchor and latestObservation deliberately stay unset on decoding.
     }
