@@ -37,6 +37,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     private var powerStatusItem: NSStatusItem?
     private var batteryStatusItem: NSStatusItem?
     private var timer: Timer?
+    private var energyWindow: NSWindow?
     private var preferencesWindow: NSWindow?
     private var preferencesController: PreferencesController?
 
@@ -54,9 +55,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     private var cachedBatteryIconStyle: BatteryIconStyle = .dark
     private var cachedBatteryShowsPercent: Bool = true
 
-    private let dashboardModel = MenuDashboardModel()
+    private lazy var dashboardModel = MenuDashboardModel()
     private var currentReading: PowerReading = .unavailable
     private let sensorQueue = DispatchQueue(label: "com.wattbar.sensors", qos: .utility)
+    private let activityMonitor = AppActivityMonitor()
+    private var acquisitionGeneration = 0
     private var readInFlight = false
     private var isSleeping = false
     private var isTerminating = false
@@ -185,26 +188,34 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         workspaceObservers = [
             center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
                 self?.isSleeping = true
+                self?.acquisitionGeneration += 1
+                self?.dashboardModel.interrupt()
+                self?.sensorQueue.async { [weak self] in self?.activityMonitor.breakContinuity() }
                 self?.timer?.invalidate()
                 self?.timer = nil
             },
             center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
                 guard let self else { return }
                 self.isSleeping = false
-                self.dashboardModel.history = PowerHistory()
-                self.sensorQueue.async { SMC.shared.close() }
+                self.dashboardModel.refreshSummaries()
+                self.sensorQueue.async {
+                    SMC.shared.close()
+                    self.activityMonitor.breakContinuity()
+                }
                 self.startTimer()
             }
         ]
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        showPreferences()
+        showEnergyHistory()
         return false
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         isTerminating = true
+        acquisitionGeneration += 1
+        dashboardModel.checkpoint()
         timer?.invalidate()
         workspaceObservers.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }
         if let source = powerSourceRunLoopSource { CFRunLoopSourceInvalidate(source) }
@@ -216,9 +227,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     /// The newest launch wins so rebuilding from Xcode replaces the old copy.
     private func quitOtherRunningInstances() {
         guard let bundleID = Bundle.main.bundleIdentifier else { return }
-        for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
-        where app != NSRunningApplication.current {
-            app.terminate()
+        let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            .filter { $0 != NSRunningApplication.current }
+        others.forEach { $0.terminate() }
+        // Let the previous instance checkpoint before lazily loading its history.
+        let deadline = Date().addingTimeInterval(2)
+        while others.contains(where: { !$0.isTerminated }), Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
         }
     }
 
@@ -346,6 +361,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     private func addCommonMenuActions(to menu: NSMenu) {
         menu.addItem(.separator())
         for (title, symbol, action, key) in [
+            ("Energy & Apps…", "chart.xyaxis.line", #selector(showEnergyHistory), "e"),
             ("Preferences…", "slider.horizontal.3", #selector(showPreferences), ","),
             ("Check for Updates…", "arrow.triangle.2.circlepath", #selector(checkForUpdates), ""),
             ("Quit WattBar", "power", #selector(quitApp), "q")
@@ -361,6 +377,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     // The dashboard is created on demand and released as soon as its menu closes.
     func menuWillOpen(_ menu: NSMenu) {
         guard let item = menu.item(withTag: 100) else { return }
+        dashboardModel.refreshSummaries()
         let batteryFocused = menu === batteryStatusItem?.menu
         let view = NSHostingView(rootView: MenuDashboardView(
             model: dashboardModel,
@@ -437,14 +454,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         // A notification and timer can coincide. Keep at most one sensor read queued.
         guard !readInFlight, !isSleeping, !isTerminating else { return }
         readInFlight = true
+        let generation = acquisitionGeneration
+        let maximumGap = max(15, refreshInterval.rawValue * 2.5)
         sensorQueue.async { [weak self] in
             let reading = SMC.shared.readPowerData()
+            let observedAt = Date()
+            let activity = self?.activityMonitor.sample(at: observedAt)
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.readInFlight = false
-                guard !self.isSleeping, !self.isTerminating else { return }
+                guard !self.isSleeping, !self.isTerminating, generation == self.acquisitionGeneration else { return }
                 self.currentReading = reading
-                self.dashboardModel.record(reading, at: Date())
+                self.dashboardModel.record(reading, at: observedAt, maximumGap: maximumGap)
+                if let activity { self.dashboardModel.recordActivity(activity) }
                 self.updateDisplay()
             }
         }
@@ -941,7 +963,29 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    @objc private func showEnergyHistory() {
+        if energyWindow == nil {
+            let view = EnergyDetailView(model: dashboardModel, hasBattery: AppDelegate.hasBattery)
+            let window = NSWindow(contentViewController: NSHostingController(rootView: view))
+            window.title = "WattBar — Energy & Apps"
+            window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+            window.isReleasedWhenClosed = false
+            window.delegate = self
+            window.setContentSize(NSSize(width: 660, height: 700))
+            window.contentMinSize = NSSize(width: 620, height: 560)
+            window.center()
+            energyWindow = window
+        }
+        dashboardModel.refreshSummaries()
+        energyWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
     func windowWillClose(_ notification: Notification) {
+        if notification.object as? NSWindow === energyWindow {
+            energyWindow = nil
+            return
+        }
         guard notification.object as? NSWindow === preferencesWindow else { return }
         preferencesWindow = nil
         preferencesController = nil

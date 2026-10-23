@@ -1,15 +1,5 @@
 import SwiftUI
 
-final class MenuDashboardModel: ObservableObject {
-    @Published var reading: PowerReading = .unavailable
-    @Published var history = PowerHistory()
-
-    func record(_ reading: PowerReading, at date: Date) {
-        history.record(reading, at: date)
-        self.reading = reading
-    }
-}
-
 struct MenuDashboardView: View {
     @ObservedObject var model: MenuDashboardModel
     let mode: DisplayMode
@@ -27,7 +17,7 @@ struct MenuDashboardView: View {
     }
     private var values: [Float] { model.history.values(for: chartMode) }
     private var average: Float? {
-        values.isEmpty ? nil : Float(values.reduce(0.0) { $0 + Double($1) } / Double(values.count))
+        model.energyHistory.summary(for: .minute, mode: chartMode, at: model.lastUpdated).averageWatts.map(Float.init)
     }
     private var metricTitle: String {
         batteryFocused ? "BATTERY LEVEL" : (mode == .systemTotal ? "SYSTEM POWER" : "BATTERY POWER")
@@ -54,6 +44,7 @@ struct MenuDashboardView: View {
             header
             reading
             trend
+            energySummary
             if hasBattery { battery }
         }
         .padding(14)
@@ -190,6 +181,37 @@ struct MenuDashboardView: View {
         }
         .font(.system(size: 10))
         .accessibilityElement(children: .combine)
+    }
+
+    private var energySummary: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack {
+                Text("Energy usage").font(.system(size: 11, weight: .semibold))
+                Spacer()
+                Text("AVG. / USED").font(.system(size: 8, weight: .medium))
+                    .tracking(0.7).foregroundStyle(.secondary)
+            }
+            ForEach(EnergyWindow.allCases) { window in
+                let summary = model.energyHistory.summary(for: window, mode: chartMode, at: model.lastUpdated)
+                HStack(alignment: .firstTextBaseline, spacing: 5) {
+                    Text(window.label).foregroundStyle(.secondary)
+                    Spacer(minLength: 4)
+                    Text(EnergyFormat.watts(summary.averageWatts))
+                        .monospacedDigit().frame(width: 59, alignment: .trailing)
+                    Text(EnergyFormat.energy(summary.wattHours))
+                        .monospacedDigit().fontWeight(.medium).frame(width: 75, alignment: .trailing)
+                }
+                .font(.system(size: 10))
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("\(window.label), average \(EnergyFormat.watts(summary.averageWatts)), used \(EnergyFormat.energy(summary.wattHours)), \(EnergyFormat.duration(summary.coveredSeconds)) recorded")
+            }
+            Text("Recorded time only · Details in Energy & Apps")
+                .font(.system(size: 9)).foregroundStyle(.secondary)
+            if !model.storageMessages.isEmpty {
+                Label("History needs attention", systemImage: "exclamationmark.triangle")
+                    .font(.system(size: 9)).foregroundStyle(.orange)
+            }
+        }
     }
 
     private var battery: some View {
