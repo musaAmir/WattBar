@@ -12,7 +12,7 @@ WattBar 1.1.0 already supports Sparkle. Keep its existing public key and Keychai
 Without Developer ID, use the explicit alternative:
 
 ```
-./release.sh --adhoc 1.3.0 6 ReleaseNotes/1.3.0.md
+./release.sh --adhoc 1.3.1 7 ReleaseNotes/1.3.1.md
 ```
 
 This creates an ad-hoc build that **has not been notarized by Apple**. Gatekeeper may block first launch. Sparkle signing authenticates updates; it does not replace Apple notarization. Do not call an ad-hoc release notarized.

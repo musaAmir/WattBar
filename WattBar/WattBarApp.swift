@@ -257,8 +257,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
             item.autosaveName = "WattBarPower"
             if let button = item.button {
                 button.title = "— W"
-                button.image = menuSymbol("bolt.fill")
-                button.imagePosition = .imageLeading
+                button.image = nil
+                button.imagePosition = .noImage
                 button.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
             }
             powerStatusItem = item
