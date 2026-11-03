@@ -230,7 +230,7 @@ struct EnergyDetailView: View {
                             .frame(width: 115, alignment: .trailing)
                     }.font(.system(size: 12)).monospacedDigit().padding(.vertical, 12).contentShape(Rectangle())
                 }.buttonStyle(.plain).accessibilityValue(window == period ? "Selected" : "")
-                if period != .day { palette.border.frame(height: 1) }
+                if period != EnergyWindow.allCases.last { palette.border.frame(height: 1) }
             }
         }.padding(19).modifier(EnergySurface(palette: palette))
         HStack(alignment: .top, spacing: 11) {
