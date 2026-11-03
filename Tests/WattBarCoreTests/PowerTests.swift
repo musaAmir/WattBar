@@ -62,6 +62,13 @@ final class PowerTests: XCTestCase {
         XCTAssertEqual(reading(charging: true, external: true).batteryStatus, "Charging")
         XCTAssertEqual(reading().batteryStatus, "On Battery")
     }
+    func testPowerMenuBarItemShowsWattageWithoutIcon() {
+        let button = NSButton(title: "", target: nil, action: nil)
+        PowerReading.configureMenuBarButton(button)
+        XCTAssertNil(button.image)
+        XCTAssertEqual(button.imagePosition, .noImage)
+        XCTAssertEqual(button.title, "— W")
+    }
 }
 
 final class PowerHistoryTests: XCTestCase {

@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 
 /// Missing sensors stay unavailable rather than becoming misleading zero readings.
 struct PowerReading {
@@ -37,6 +37,14 @@ struct PowerReading {
     static func watts(_ value: Float?) -> String {
         guard let value, value.isFinite else { return "— W" }
         return String(format: "%.1f W", value)
+    }
+
+    /// The power item shows the wattage as text only; 1.3.0 regressed by adding a bolt icon.
+    static func configureMenuBarButton(_ button: NSButton) {
+        button.title = watts(nil)
+        button.image = nil
+        button.imagePosition = .noImage
+        button.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
     }
 
     var batteryStatus: String {

@@ -255,12 +255,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
             // A stable name lets macOS remember this item (position, visibility) across launches
             // instead of tracking anonymous "Item-0"/"Item-1" entries that pile up as duplicates
             item.autosaveName = "WattBarPower"
-            if let button = item.button {
-                button.title = "— W"
-                button.image = nil
-                button.imagePosition = .noImage
-                button.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
-            }
+            if let button = item.button { PowerReading.configureMenuBarButton(button) }
             powerStatusItem = item
             buildPowerMenu()
         } else if !showPowerInMenuBar, let item = powerStatusItem {
