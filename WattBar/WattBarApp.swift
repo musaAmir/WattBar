@@ -425,6 +425,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
 
     private func startTimer() {
         guard !isSleeping, !isTerminating else { return }
+        timer?.invalidate()
         let interval = max(1.0, refreshInterval.rawValue)
         let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             self?.refreshReading()
