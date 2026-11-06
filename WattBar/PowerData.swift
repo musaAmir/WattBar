@@ -52,6 +52,28 @@ struct PowerReading {
     }
 }
 
+/// Keeps at most one sensor read queued. A read already running may have seen the
+/// old power source, so a change during it asks for one more read when it finishes.
+struct SensorReadGate {
+    private var inFlight = false
+    private var rereadRequested = false
+
+    mutating func begin(rereadIfBusy: Bool = false) -> Bool {
+        guard inFlight else {
+            inFlight = true
+            return true
+        }
+        if rereadIfBusy { rereadRequested = true }
+        return false
+    }
+
+    /// Returns whether another read is owed.
+    mutating func finish() -> Bool {
+        defer { inFlight = false; rereadRequested = false }
+        return rereadRequested
+    }
+}
+
 /// SMC float values are little endian; integer and fixed-point values are big endian.
 /// Decode bytes explicitly, without unaligned pointer loads or unchecked copies.
 enum SMCValueDecoder {

@@ -61,7 +61,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     private let sensorQueue = DispatchQueue(label: "com.wattbar.sensors", qos: .utility)
     private let activityMonitor = AppActivityMonitor()
     private var acquisitionGeneration = 0
-    private var readInFlight = false
+    private var readGate = SensorReadGate()
     private var isSleeping = false
     private var isTerminating = false
     private var powerSourceRunLoopSource: CFRunLoopSource?
@@ -447,10 +447,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         startTimer()
     }
 
-    private func refreshReading() {
+    private func refreshReading(rereadIfBusy: Bool = false) {
         // A notification and timer can coincide. Keep at most one sensor read queued.
-        guard !readInFlight, !isSleeping, !isTerminating else { return }
-        readInFlight = true
+        guard !isSleeping, !isTerminating, readGate.begin(rereadIfBusy: rereadIfBusy) else { return }
         let generation = acquisitionGeneration
         let maximumGap = max(15, refreshInterval.rawValue * 2.5)
         sensorQueue.async { [weak self] in
@@ -459,7 +458,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
             let activity = self?.activityMonitor.sample(at: observedAt)
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                self.readInFlight = false
+                let rereadOwed = self.readGate.finish()
+                defer { if rereadOwed { self.refreshReading() } }
                 guard !self.isSleeping, !self.isTerminating, generation == self.acquisitionGeneration else { return }
                 self.currentReading = reading
                 self.dashboardModel.record(reading, at: observedAt, maximumGap: maximumGap)
@@ -484,7 +484,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
 
     @objc private func powerSourceChanged() {
         DispatchQueue.main.async { [weak self] in
-            self?.refreshReading()
+            self?.refreshReading(rereadIfBusy: true)
         }
     }
 

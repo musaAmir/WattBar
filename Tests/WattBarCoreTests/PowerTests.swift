@@ -71,6 +71,25 @@ final class PowerTests: XCTestCase {
     }
 }
 
+final class SensorReadGateTests: XCTestCase {
+    func testOnlyOneReadRunsAtATime() {
+        var gate = SensorReadGate()
+        XCTAssertTrue(gate.begin())
+        XCTAssertFalse(gate.begin())
+        XCTAssertFalse(gate.finish())
+        XCTAssertTrue(gate.begin())
+    }
+    func testPowerSourceChangeDuringAReadIsReadAgainOnce() {
+        var gate = SensorReadGate()
+        XCTAssertTrue(gate.begin())
+        XCTAssertFalse(gate.begin(rereadIfBusy: true))
+        XCTAssertFalse(gate.begin(rereadIfBusy: true))
+        XCTAssertTrue(gate.finish())
+        XCTAssertTrue(gate.begin())
+        XCTAssertFalse(gate.finish())
+    }
+}
+
 final class PowerHistoryTests: XCTestCase {
     private let start = Date(timeIntervalSince1970: 1_000)
 
